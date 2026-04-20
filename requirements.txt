@@ -1,5 +1,7 @@
+
 yfinance
-pandas
-ta
-pytz
+pandas_ta
 requests
+pyTelegramBotAPI
+pytz
+schedule

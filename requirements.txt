@@ -1,7 +1,8 @@
-
-yfinance
-pandas_ta
-requests
-pyTelegramBotAPI
-pytz
-schedule
+yfinance==0.2.40
+numpy==1.26.4
+pandas==2.2.2
+pandas_ta==0.3.14b0
+requests==2.32.3
+pyTelegramBotAPI==4.25.0
+pytz==2024.1
+schedule==1.2.2

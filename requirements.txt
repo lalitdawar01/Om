@@ -1,1 +1,6 @@
 
+yfinance
+pandas
+ta==0.11.0
+requests
+pytz

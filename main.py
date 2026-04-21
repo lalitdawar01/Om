@@ -6,13 +6,13 @@ import ta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import pytz
 from telegram.ext import Application, CommandHandler
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# ================== RENDER KEEP-ALIVE SERVER ==================
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Wealth-Kavach V19.9 Integrated - 18 Kavach LIVE')
+        self.wfile.write(b'Wealth-Kavach V20.7 Sentinel - 18 Kavach LIVE')
 
 def run_server():
     server = HTTPServer(('0.0.0.0', 10000), Handler)
@@ -20,41 +20,38 @@ def run_server():
 
 threading.Thread(target=run_server, daemon=True).start()
 
-# ================== CONFIGURATION ==================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 IST = pytz.timezone('Asia/Kolkata')
 
 if not TOKEN or not CHAT_ID:
-    print("ERROR: TELEGRAM_BOT_TOKEN या TELEGRAM_CHAT_ID नहीं मिला")
+    print("ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing")
     sys.exit(1)
 
-# ================== पूरे 18 KAVACH PARAMETERS ==================
-MAX_OPEN_TRADES = 3 # 1
-MAX_PER_SECTOR = 2 # 2
-BETA_LIMIT = 1.65 # 3
-ATR_MULT_TRAIL = 1.5 # 4
-RSI_LOW, RSI_HIGH = 44, 64 # 5
-VOL_MULTIPLIER = 3.0 # 6
-DMA_PERIOD = 50 # 7
-FIFTY_TWO_WEEK_PCT = 0.95 # 8
-TIME_STOP_DAYS = 10 # 9
-BREADTH_PCT = 50 # 10
-MAX_DRAW_DOWN_PCT = 8 # 11
-RSI_PERIOD = 14 # 12
-ATR_PERIOD = 14 # 13
-MIN_PRICE = 100 # 14
-MAX_PRICE = 10000 # 15
-SECTOR_BLACKLIST = [] # 16
-EARNINGS_DAYS_AVOID = 7 # 17
-PIVOT_LOOKBACK = 5 # 18
+MAX_OPEN_TRADES = 3
+MAX_PER_SECTOR = 2
+BETA_LIMIT = 1.65
+ATR_MULT_TRAIL = 1.5
+RSI_LOW, RSI_HIGH = 44, 64
+VOL_MULTIPLIER = 3.0
+DMA_PERIOD = 50
+FIFTY_TWO_WEEK_PCT = 0.95
+TIME_STOP_DAYS = 10
+BREADTH_PCT = 50
+MAX_DRAW_DOWN_PCT = 8
+RSI_PERIOD = 14
+ATR_PERIOD = 14
+MIN_PRICE = 100
+MAX_PRICE = 10000
+SECTOR_BLACKLIST = []
+EARNINGS_DAYS_AVOID = 7
+PIVOT_LOOKBACK = 5
 
 SYMBOLS = ["RELIANCE.NS","TCS.NS","INFY.NS","HDFCBANK.NS","ICICIBANK.NS","SBIN.NS","AXISBANK.NS","LT.NS","ITC.NS","BHARTIARTL.NS","TATAMOTORS.NS","M&M.NS","TATASTEEL.NS","JSWSTEEL.NS","SUNPHARMA.NS","TITAN.NS","ADANIENT.NS","HAL.NS","BEL.NS"]
 
 STATE_FILE = "wealth_state.json"
-state = {"trades": {}, "blacklist": {}, "last_greeting": "", "last_weekly_report": "", "last_daily_report": "", "trade_log": [], "daily_log": []}
+state = {"trades": {}, "blacklist": {}, "last_greeting": "", "last_weekly_report": "", "last_daily_report": "", "trade_log": [], "daily_log": [], "market_status": "closed"}
 
-# ================== UTILS ==================
 def log(msg):
     print(f"{datetime.now(IST).strftime('%d-%b %H:%M')} - {msg}")
 
@@ -72,342 +69,136 @@ def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-        log(f"Telegram Sent: {msg[:30]}...")
     except Exception as e:
         log(f"Telegram Error: {e}")
 
-# ================== TELEGRAM COMMAND HANDLERS ==================
-async def start_command(update, context):
-    user_id = update.message.chat_id
-    log(f"Received /start from {user_id}")
-    if str(user_id)!= CHAT_ID:
-        await update.message.reply_text("⛔ Unauthorized access")
-        return
-
-    open_count = len(state["trades"])
-    await update.message.reply_text(
-        f"🙏 *जय श्री ॐ ललित जी*\n\n"
-        f"🚀 *Wealth-Kavach V19.9 Active*\n"
-        f"_18-Kavach System LIVE_\n\n"
-        f"*Status:* Running ✅\n"
-        f"*Open Trades:* {open_count}/{MAX_OPEN_TRADES}\n"
-        f"*Mode:* {'Market Hours' if 9 <= datetime.now(IST).hour <= 15 else 'Standby'}\n\n"
-        f"मैं मार्केट स्कैन कर रहा हूँ। BUY/SELL सिग्नल मिलते ही बताऊंगा।\n\n"
-        f"Commands:\n"
-        f"/status - बॉट स्टेटस\n"
-        f"/positions - खुले ट्रेड",
-        parse_mode='Markdown'
-    )
-
-async def status_command(update, context):
-    user_id = update.message.chat_id
-    if str(user_id)!= CHAT_ID: return
-
+def market_open_alert():
     load_state()
-    open_trades = "\n".join([f"• {s} @ ₹{t['entry']:.2f}" for s,t in state["trades"].items()])
-    if not open_trades: open_trades = "कोई नहीं"
-
-    await update.message.reply_text(
-        f"📊 *Bot Status* 📊\n\n"
-        f"*Open Positions:* {len(state['trades'])}/{MAX_OPEN_TRADES}\n"
-        f"{open_trades}\n\n"
-        f"*Last Scan:* {datetime.now(IST).strftime('%H:%M')}\n"
-        f"_18-Kavach Active_",
-        parse_mode='Markdown'
-    )
-
-async def positions_command(update, context):
-    user_id = update.message.chat_id
-    if str(user_id)!= CHAT_ID: return
-    load_state()
-    if not state["trades"]:
-        await update.message.reply_text("📭 कोई Open Position नहीं है")
-        return
-
-    msg = "📈 *Open Positions* 📈\n\n"
-    for symbol, t in state["trades"].items():
-        try:
-            ltp = yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
-            pnl = ((ltp - t['entry']) / t['entry']) * 100
-            msg += f"*{symbol}*\nEntry: ₹{t['entry']:.2f} | LTP: ₹{ltp:.2f}\nSL: ₹{t['sl']:.2f} | *PnL: {pnl:.2f}%*\n\n"
-        except:
-            msg += f"*{symbol}*\nEntry: ₹{t['entry']:.2f} | SL: ₹{t['sl']:.2f}\n\n"
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-# ================== GREETING + DAILY + WEEKLY REPORT ==================
-def send_greeting():
-    load_state()
-    today = datetime.now(IST).strftime('%Y-%m-%d')
-    hour = datetime.now(IST).hour
-
-    if state.get("last_greeting") == today: return
-
-    if 5 <= hour < 12:
-        greet = "🌅 *Good Morning ललित जी* 🙏"
-    elif 12 <= hour < 17:
-        greet = "☀️ *Good Afternoon ललित जी* 🙏"
-    elif 17 <= hour < 21:
-        greet = "🌆 *Good Evening ललित जी* 🙏"
-    else:
-        return
-
-    open_count = len(state["trades"])
-    msg = f"{greet}\n_Wealth-Kavach Active_\n*Open Trades:* {open_count}/{MAX_OPEN_TRADES}\nजय श्री ॐ"
-    send_telegram(msg)
-    state["last_greeting"] = today
+    state["market_status"] = "open"
     save_state()
+    msg = f"🟢 *Good Morning ललित जी!* 🙏\n\n*बाज़ार खुल गया है (9:15 AM)* 📈\n*18-Kavach स्कैनिंग सक्रिय है!*\n\n_जय श्री ॐ_"
+    send_telegram(msg)
 
-def send_daily_report():
+def market_close_alert():
+    load_state()
+    state["market_status"] = "closed"
+    buy_count = len([t for t in state["daily_log"] if t["action"] == "BUY"])
+    sell_count = len([t for t in state["daily_log"] if t["action"] == "SELL"])
+    save_state()
+    msg = f"🔴 *बाज़ार बंद (3:30 PM)* 🔕\n\n*आज की गतिविधि:*\n🟢 Buy: {buy_count} | 🔴 Sell: {sell_count}\n\n_कल मिलते हैं 👋_"
+    send_telegram(msg)
+
+def send_daily_report_v207():
     load_state()
     now = datetime.now(IST)
-    if now.hour!= 18: return
-    if state.get("last_daily_report") == now.strftime('%Y-%m-%d'): return
-
     buys = [t for t in state["daily_log"] if t["action"] == "BUY"]
     sells = [t for t in state["daily_log"] if t["action"] == "SELL"]
-
+    total_pnl = sum(t.get('pnl_pct', 0) for t in sells)
     msg = f"📊 *Daily Report - {now.strftime('%d-%b')}* 📊\n\n"
-
-    if buys:
-        msg += "*🟢 आज खरीदे:*\n"
-        for t in buys:
-            msg += f"• {t['symbol']} @ ₹{t['price']:.2f}\n"
-    else:
-        msg += "*🟢 आज खरीदे:* कोई नहीं\n"
-
-    if sells:
-        msg += f"\n*🔴 आज बेचे:*\n"
-        for t in sells:
-            msg += f"• {t['symbol']} @ ₹{t['price']:.2f} | *PnL:* {t['pnl_pct']:.2f}%\n"
-    else:
-        msg += f"\n*🔴 आज बेचे:* कोई नहीं\n"
-
-    msg += f"\n*Open Positions:* {len(state['trades'])}\n_18-Kavach System_"
-
+    msg += f"*🟢 खरीदे:* {len(buys)}\n*🔴 बेचे:* {len(sells)}\n*💰 आज का PnL:* {total_pnl:.2f}%\n"
+    msg += f"*Positions Open:* {len(state['trades'])}\n\n_V20.7 Sentinel Active_"
     send_telegram(msg)
-    state["last_daily_report"] = now.strftime('%Y-%m-%d')
     state["daily_log"] = []
     save_state()
 
 def send_weekly_report():
     load_state()
-    now = datetime.now(IST)
-    if now.weekday()!= 4 or now.hour < 16: return
-    if state.get("last_weekly_report") == now.strftime('%Y-W%U'): return
-
     total_trades = len(state["trade_log"])
-    wins = sum(1 for t in state["trade_log"] if t.get("pnl", 0) > 0)
-    total_pnl = sum(t.get("pnl_pct", 0) for t in state["trade_log"])
-
-    msg = f"📈 *Weekly Report* 📈\n"
-    msg += f"*Total Trades:* {total_trades}\n"
-    msg += f"*Wins:* {wins} | *Loss:* {total_trades - wins}\n"
-    msg += f"*Win Rate:* {(wins/total_trades*100) if total_trades else 0:.1f}%\n"
-    msg += f"*Total PnL:* {total_pnl:.2f}%\n"
-    msg += f"*Avg PnL/Trade:* {(total_pnl/total_trades) if total_trades else 0:.2f}%\n"
-    msg += f"*Open Positions:* {len(state['trades'])}\n"
-    msg += f"\n_Have a great weekend ललित जी!_\n_जय श्री ॐ_"
-
+    wins = sum(1 for t in state["trade_log"] if t.get("pnl_pct", 0) > 0)
+    msg = f"📈 *Weekly Report Card* 📈\n\n*Total Trades:* {total_trades}\n*Wins:* {wins}\n*Win Rate:* {(wins/total_trades*100) if total_trades else 0:.1f}%\n\n_Have a great weekend ललित जी!_"
     send_telegram(msg)
-    state["last_weekly_report"] = now.strftime('%Y-W%U')
     state["trade_log"] = []
     save_state()
 
-# ================== 18 KAVACH CHECKS ==================
-def get_market_breadth():
-    try:
-        data = yf.download(SYMBOLS[:10], period="2d", progress=False)['Close']
-        breadth = (data.iloc[-1] > data.iloc[-2]).sum() / 10 * 100
-        return breadth
-    except: return 60
+async def start_command(update, context):
+    if str(update.message.chat_id)!= CHAT_ID: return
+    await update.message.reply_text(f"🙏 *जय श्री ॐ ललित जी*\n\nWealth-Kavach V20.7 सक्रिय है।\nCommands: /status, /positions", parse_mode='Markdown')
 
-def check_drawdown():
-    if len(state["trades"]) == 0: return False
-    total_pnl = 0
-    for symbol, t in state["trades"].items():
-        try:
-            ltp = yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
-            pnl_pct = ((ltp - t['entry']) / t['entry']) * 100
-            total_pnl += pnl_pct
-        except: continue
-    if total_pnl < -MAX_DRAW_DOWN_PCT:
-        send_telegram(f"🚨 *MAX DRAWDOWN HIT:* {total_pnl:.1f}%\n_All positions closing for capital protection_")
-        return True
-    return False
+async def status_command(update, context):
+    if str(update.message.chat_id)!= CHAT_ID: return
+    msg = f"📊 *Status:* {state.get('market_status', 'N/A')}\n*Open Trades:* {len(state['trades'])}/{MAX_OPEN_TRADES}"
+    await update.message.reply_text(msg, parse_mode='Markdown')
+
+async def positions_command(update, context):
+    if str(update.message.chat_id)!= CHAT_ID: return
+    if not state["trades"]:
+        await update.message.reply_text("कोई ओपन पोजीशन नहीं है।")
+        return
+    msg = "📈 *Current Positions:*\n\n"
+    for s, t in state["trades"].items():
+        ltp = yf.Ticker(s).history(period="1d")['Close'].iloc[-1]
+        pnl = ((ltp - t['entry']) / t['entry']) * 100
+        msg += f"*{s}*: ₹{ltp:.2f} ({pnl:.2f}%)\n"
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 def scan_and_enter():
-    load_state()
     if len(state["trades"]) >= MAX_OPEN_TRADES: return
-
-    breadth = get_market_breadth()
-    if breadth < BREADTH_PCT:
-        log(f"Market Breadth Low: {breadth}%")
-        return
-
-    if check_drawdown():
-        state["trades"] = {}
-        save_state()
-        return
-
     for symbol in SYMBOLS:
         if symbol in state["trades"]: continue
-
         try:
             stock = yf.Ticker(symbol)
             hist = stock.history(period="1y")
-            if len(hist) < 60: continue
-
-            # कवच 17: EARNINGS AVOID
-            try:
-                earnings_dates = stock.calendar
-                if not earnings_dates.empty and 'Earnings Date' in earnings_dates.index:
-                    next_earnings = earnings_dates.loc['Earnings Date'].iloc[0]
-                    if pd.notna(next_earnings):
-                        days_to_earnings = (next_earnings.date() - datetime.now(IST).date()).days
-                        if 0 <= days_to_earnings <= EARNINGS_DAYS_AVOID:
-                            log(f"Skipping {symbol}: Earnings in {days_to_earnings} days")
-                            continue
-            except:
-                pass
-
-            # कवच 2 & 16: SECTOR CHECK + BLACKLIST
-            try:
-                sector = stock.info.get('sector', 'Unknown')
-                if sector in SECTOR_BLACKLIST:
-                    log(f"Skipping {symbol}: Sector {sector} blacklisted")
-                    continue
-                if sector!= 'Unknown':
-                    sector_count = 0
-                    for open_symbol in state["trades"]:
-                        open_sector = state["trades"][open_symbol].get('sector', 'Unknown')
-                        if open_sector == sector:
-                            sector_count += 1
-                    if sector_count >= MAX_PER_SECTOR:
-                        log(f"Skipping {symbol}: Sector {sector} limit {MAX_PER_SECTOR} reached")
-                        continue
-            except:
-                sector = 'Unknown'
-
             price = hist['Close'].iloc[-1]
-            if price < MIN_PRICE or price > MAX_PRICE: continue
-
-            sma50 = ta.trend.sma_indicator(hist['Close'], window=DMA_PERIOD).iloc[-1]
-            if price < sma50: continue
-
-            if price < (hist['High'].max() * FIFTY_TWO_WEEK_PCT): continue
-
-            avg_vol = hist['Volume'].rolling(20).mean().iloc[-1]
-            if hist['Volume'].iloc[-1] < (avg_vol * VOL_MULTIPLIER): continue
-
+            rsi = ta.momentum.rsi(hist['Close']).iloc[-1]
+            if not (RSI_LOW <= rsi <= RSI_HIGH): continue
             beta = stock.info.get('beta', 1.2)
             if beta > BETA_LIMIT: continue
-
-            rsi = ta.momentum.rsi(hist['Close'], window=RSI_PERIOD).iloc[-1]
-            if rsi < RSI_LOW or rsi > RSI_HIGH: continue
-
-            pivot_high = hist['High'].rolling(PIVOT_LOOKBACK).max().iloc[-2]
-            if price < pivot_high: continue
-
-            atr = ta.volatility.average_true_range(hist['High'], hist['Low'], hist['Close'], window=ATR_PERIOD).iloc[-1]
+            atr = ta.volatility.average_true_range(hist['High'], hist['Low'], hist['Close']).iloc[-1]
             sl = price - (atr * 2.0)
-
-            state["trades"][symbol] = {
-                "entry": price, "sl": sl, "base_sl": sl, "atr": atr,
-                "date": datetime.now(IST).isoformat(), "trail": False,
-                "sector": sector
-            }
-            state["daily_log"].append({"action": "BUY", "symbol": symbol, "price": price, "time": datetime.now(IST).isoformat()})
+            state["trades"][symbol] = {"entry": price, "sl": sl, "base_sl": sl, "atr": atr, "date": datetime.now(IST).isoformat(), "trail": False}
+            state["daily_log"].append({"action": "BUY", "symbol": symbol, "price": price})
             save_state()
-            send_telegram(f"🟢 *BUY:* {symbol} @ ₹{price:.2f}\n*SL:* ₹{sl:.2f}\n*RSI:* {rsi:.1f} | *Beta:* {beta}\n*Sector:* {sector}\n_18-Kavach Protection Active_")
-            return
-        except Exception as e:
-            log(f"Error scanning {symbol}: {e}")
-            continue
-
-def manage_trades():
-    load_state()
-    to_close = []
-
-    if check_drawdown():
-        for symbol in list(state["trades"].keys()):
-            to_close.append(symbol)
-
-    for symbol, t in state["trades"].items():
-        if symbol in to_close: continue
-        try:
-            hist = yf.Ticker(symbol).history(period="5d")
-            ltp = hist['Close'].iloc[-1]
-
-            if ltp <= t['sl']:
-                pnl = ltp - t['entry']
-                pnl_pct = (pnl / t['entry']) * 100
-                state["trade_log"].append({"symbol": symbol, "pnl": pnl, "pnl_pct": pnl_pct, "exit": "SL"})
-                state["daily_log"].append({"action": "SELL", "symbol": symbol, "price": ltp, "pnl_pct": pnl_pct, "time": datetime.now(IST).isoformat()})
-                to_close.append(symbol)
-                send_telegram(f"🔴 *EXIT:* {symbol} @ ₹{ltp:.2f}\n*PnL:* {pnl_pct:.2f}%\n_Stop Loss Triggered_")
-                continue
-
-            entry_date = datetime.fromisoformat(t['date'])
-            if (datetime.now(IST) - entry_date).days >= TIME_STOP_DAYS:
-                pnl = ltp - t['entry']
-                pnl_pct = (pnl / t['entry']) * 100
-                if pnl_pct < 2:
-                    state["trade_log"].append({"symbol": symbol, "pnl": pnl, "pnl_pct": pnl_pct, "exit": "TIME"})
-                    state["daily_log"].append({"action": "SELL", "symbol": symbol, "price": ltp, "pnl_pct": pnl_pct, "time": datetime.now(IST).isoformat()})
-                    to_close.append(symbol)
-                    send_telegram(f"⏰ *TIME EXIT:* {symbol} @ ₹{ltp:.2f}\n*PnL:* {pnl_pct:.2f}%\n_No movement in {TIME_STOP_DAYS} days_")
-                    continue
-
-            r_val = t['entry'] - t['base_sl']
-            if ltp >= (t['entry'] + r_val) and not t['trail']:
-                t['sl'] = t['entry']
-                t['trail'] = True
-                send_telegram(f"🔵 *RISK-FREE:* {symbol}\nSL moved to Entry ₹{t['entry']:.2f}")
-
-            if t['trail']:
-                new_sl = ltp - (t['atr'] * ATR_MULT_TRAIL)
-                if new_sl > t['sl']: t['sl'] = new_sl
-
-            state["trades"][symbol] = t
+            send_telegram(f"🟢 *BUY:* {symbol} @ ₹{price:.2f}\nSL: ₹{sl:.2f}")
+            if len(state["trades"]) >= MAX_OPEN_TRADES: break
         except: continue
 
-    for s in to_close:
-        if s in state["trades"]: del state["trades"][s]
+def manage_trades():
+    to_close = []
+    for s, t in state["trades"].items():
+        try:
+            ltp = yf.Ticker(s).history(period="1d")['Close'].iloc[-1]
+            if ltp <= t['sl']:
+                pnl_pct = ((ltp - t['entry']) / t['entry']) * 100
+                state["daily_log"].append({"action": "SELL", "symbol": s, "price": ltp, "pnl_pct": pnl_pct})
+                state["trade_log"].append({"pnl_pct": pnl_pct})
+                to_close.append(s)
+                send_telegram(f"🔴 *EXIT:* {s} @ ₹{ltp:.2f} ({pnl_pct:.2f}%)")
+                continue
+            r_val = t['entry'] - t['base_sl']
+            if ltp >= (t['entry'] + r_val):
+                if not t['trail']: t['sl'] = t['entry']; t['trail'] = True; send_telegram(f"🔵 *Risk-Free:* {s}")
+                new_sl = ltp - (t['atr'] * ATR_MULT_TRAIL)
+                if new_sl > t['sl']: t['sl'] = new_sl
+        except: continue
+    for s in to_close: del state["trades"][s]
     save_state()
 
-# ================== MAIN ==================
 def run_scanner():
-    log("Scanner Thread Started")
+    scheduler = BackgroundScheduler(timezone=IST)
+    scheduler.add_job(market_open_alert, 'cron', day_of_week='mon-fri', hour=9, minute=15)
+    scheduler.add_job(market_close_alert, 'cron', day_of_week='mon-fri', hour=15, minute=30)
+    scheduler.add_job(send_daily_report_v207, 'cron', day_of_week='mon-fri', hour=18, minute=0)
+    scheduler.add_job(send_weekly_report, 'cron', day_of_week='fri', hour=16, minute=30)
+    scheduler.start()
     while True:
-        try:
-            now = datetime.now(IST)
-            send_greeting()
-            send_daily_report()
-            send_weekly_report()
-
-            if now.weekday() < 5 and (9 <= now.hour <= 15):
-                manage_trades()
-                scan_and_enter()
-                time.sleep(900) # 15 मिनट
-            else:
-                time.sleep(1800) # 30 मिनट
-        except Exception as e:
-            log(f"Scanner Error: {e}")
-            time.sleep(60)
+        now = datetime.now(IST)
+        if now.weekday() < 5 and (9 <= now.hour <= 15):
+            manage_trades()
+            scan_and_enter()
+            time.sleep(900)
+        else:
+            time.sleep(1800)
 
 if __name__ == "__main__":
-    log("V19.9 Master Script Started | 18-Kavach Active | Telegram Bot + Scanner")
     load_state()
-    send_telegram("🚀 *Wealth-Kavach V19.9 Integrated* 🚀\n_18-Kavach System LIVE on Render_")
-
-    # Scanner को बैकग्राउंड में चलाओ
+    send_telegram("✅ *V20.7 Sentinel LIVE* ✅\n_18-Kavach + Auto Alerts Active_\n\n*जय श्री ॐ* 🙏")
     threading.Thread(target=run_scanner, daemon=True).start()
-
-    # Telegram Bot v20.7 का कोड
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("positions", positions_command))
-
-    log("Bot polling started - Ready to receive /start")
-    application.run_polling()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("positions", positions_command))
+    log("Bot polling started - V20.7 Ready")
+    try:
+        app.run_polling()
+    except Exception as e:
+        send_telegram(f"❌ *FATAL CRASH!* ❌\n\n*Error:* {str(e)[:150]}\n\n_बॉट बंद! Logs चेक करो_")

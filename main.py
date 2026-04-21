@@ -1,4 +1,3 @@
-
 import os, time, json, requests, sys, threading
 from datetime import datetime, timedelta
 import yfinance as yf
@@ -6,7 +5,7 @@ import pandas as pd
 import ta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import pytz
-from telegram.ext import Updater, CommandHandler
+from telegram.ext import Application, CommandHandler
 
 # ================== RENDER KEEP-ALIVE SERVER ==================
 class Handler(BaseHTTPRequestHandler):
@@ -78,15 +77,15 @@ def send_telegram(msg):
         log(f"Telegram Error: {e}")
 
 # ================== TELEGRAM COMMAND HANDLERS ==================
-def start_command(update, context):
+async def start_command(update, context):
     user_id = update.message.chat_id
     log(f"Received /start from {user_id}")
     if str(user_id)!= CHAT_ID:
-        update.message.reply_text("⛔ Unauthorized access")
+        await update.message.reply_text("⛔ Unauthorized access")
         return
-    
+
     open_count = len(state["trades"])
-    update.message.reply_text(
+    await update.message.reply_text(
         f"🙏 *जय श्री ॐ ललित जी*\n\n"
         f"🚀 *Wealth-Kavach V19.9 Active*\n"
         f"_18-Kavach System LIVE_\n\n"
@@ -100,15 +99,15 @@ def start_command(update, context):
         parse_mode='Markdown'
     )
 
-def status_command(update, context):
+async def status_command(update, context):
     user_id = update.message.chat_id
     if str(user_id)!= CHAT_ID: return
-    
+
     load_state()
     open_trades = "\n".join([f"• {s} @ ₹{t['entry']:.2f}" for s,t in state["trades"].items()])
     if not open_trades: open_trades = "कोई नहीं"
-    
-    update.message.reply_text(
+
+    await update.message.reply_text(
         f"📊 *Bot Status* 📊\n\n"
         f"*Open Positions:* {len(state['trades'])}/{MAX_OPEN_TRADES}\n"
         f"{open_trades}\n\n"
@@ -117,14 +116,14 @@ def status_command(update, context):
         parse_mode='Markdown'
     )
 
-def positions_command(update, context):
+async def positions_command(update, context):
     user_id = update.message.chat_id
     if str(user_id)!= CHAT_ID: return
     load_state()
     if not state["trades"]:
-        update.message.reply_text("📭 कोई Open Position नहीं है")
+        await update.message.reply_text("📭 कोई Open Position नहीं है")
         return
-    
+
     msg = "📈 *Open Positions* 📈\n\n"
     for symbol, t in state["trades"].items():
         try:
@@ -133,7 +132,7 @@ def positions_command(update, context):
             msg += f"*{symbol}*\nEntry: ₹{t['entry']:.2f} | LTP: ₹{ltp:.2f}\nSL: ₹{t['sl']:.2f} | *PnL: {pnl:.2f}%*\n\n"
         except:
             msg += f"*{symbol}*\nEntry: ₹{t['entry']:.2f} | SL: ₹{t['sl']:.2f}\n\n"
-    update.message.reply_text(msg, parse_mode='Markdown')
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 # ================== GREETING + DAILY + WEEKLY REPORT ==================
 def send_greeting():
@@ -400,17 +399,15 @@ if __name__ == "__main__":
     log("V19.9 Master Script Started | 18-Kavach Active | Telegram Bot + Scanner")
     load_state()
     send_telegram("🚀 *Wealth-Kavach V19.9 Integrated* 🚀\n_18-Kavach System LIVE on Render_")
-    
+
     # Scanner को बैकग्राउंड में चलाओ
     threading.Thread(target=run_scanner, daemon=True).start()
-    
-    # Telegram Bot शुरू करो - /start सुनेगा
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start_command))
-    dp.add_handler(CommandHandler("status", status_command))
-    dp.add_handler(CommandHandler("positions", positions_command))
-    
+
+    # Telegram Bot v20.7 का कोड
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("positions", positions_command))
+
     log("Bot polling started - Ready to receive /start")
-    updater.start_polling()
-    updater.idle()
+    application.run_polling()

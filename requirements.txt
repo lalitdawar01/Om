@@ -1,7 +1,6 @@
-
-python-telegram-bot==21.9
-apscheduler
 yfinance
-ta
+pandas
 requests
+python-telegram-bot
+ta
 pytz

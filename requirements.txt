@@ -4,3 +4,4 @@ requests
 python-telegram-bot
 ta
 pytz
+apscheduler

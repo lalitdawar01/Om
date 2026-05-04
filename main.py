@@ -1,3 +1,4 @@
+
 import os
 import time
 import sqlite3
@@ -24,7 +25,7 @@ NSE500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv
 BASE_CAPITAL = 100000
 RISK_PER_TRADE = 0.015
 SCAN_INTERVAL = 1800
-MAX_WORKERS = 2
+MAX_WORKERS = 2 # V32.1: 2 ही रखो, ज्यादा से Rate Limit आएगी
 
 LAST_GREETING_DATE = None
 LAST_REPORT_DATE = None
@@ -91,6 +92,7 @@ def init_db():
 
 def nifty_bear_check():
     try:
+        time.sleep(0.5) # V32.1: Rate limit से बचाव
         nifty = yf.Ticker("^NSEI")
         hist = nifty.history(period="100d")
         if hist.empty: return False
@@ -101,7 +103,7 @@ def nifty_bear_check():
 
 def one_min_confirmation(symbol):
     try:
-        time.sleep(0.5)
+        time.sleep(0.5) # V32.1: Rate limit से बचाव
         df = yf.download(symbol, period="1d", interval="1m", progress=False, auto_adjust=True)
         if df.empty: return False
         return df["Close"].iloc[-1] > df["High"].iloc[-10:-1].max()
@@ -109,10 +111,8 @@ def one_min_confirmation(symbol):
 
 def analyze_stock(symbol):
     try:
-        # NIFTY चौकीदार V25.2
         if nifty_bear_check(): return None
-
-        time.sleep(random.uniform(1.0, 2.0))
+        time.sleep(random.uniform(1.0, 2.0)) # V32.1: Random delay 1-2 sec
         df = yf.download(symbol, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
         if df.empty or len(df) < 220: return None
 
@@ -129,9 +129,7 @@ def analyze_stock(symbol):
         momentum = (50 < rsi.iloc[-1] < 66) and (adx.iloc[-1] > 25) and (ema_slope > 0.2)
 
         if bullish and momentum and vol_breakout:
-            # 1-Min चौकीदार V25.2
             if not one_min_confirmation(symbol): return None
-
             current_cap, max_slots = get_dynamic_config()
             available_cap = get_available_capital()
             if available_cap < price: return None
@@ -148,7 +146,7 @@ def manage_exits():
     trades = conn.execute("SELECT id, symbol, entry, sl, target, qty, highest_price FROM trades WHERE status='OPEN'").fetchall()
     for tid, sym, entry, current_sl, target, qty, high_price in trades:
         try:
-            time.sleep(1)
+            time.sleep(1) # V32.1: Rate limit से बचाव
             df = yf.download(sym, period="2d", interval="5m", progress=False, auto_adjust=True, threads=False)
             if df.empty: continue
             current = float(df["Close"].iloc[-1])
@@ -181,7 +179,7 @@ def check_telegram_commands():
                 net_pnl = conn.execute("SELECT SUM(pnl) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0
                 open_tr = conn.execute("SELECT symbol, entry FROM trades WHERE status='OPEN'").fetchall()
                 conn.close()
-                msg = f"📊 BRAHMAND KAVACH V32.0\n💰 Total Capital: ₹{cap:,.0f}\n💵 Available: ₹{avail:,.0f}\n📦 Slots: {len(open_tr)}/{slots}\n💹 Net P&L: ₹{net_pnl:,.2f}\n\n📦 Open Positions:"
+                msg = f"📊 BRAHMAND KAVACH V32.1\n💰 Total Capital: ₹{cap:,.0f}\n💵 Available: ₹{avail:,.0f}\n📦 Slots: {len(open_tr)}/{slots}\n💹 Net P&L: ₹{net_pnl:,.2f}\n\n📦 Open Positions:"
                 msg += "\n".join([f"\n- {t[0]} @ ₹{t[1]}" for t in open_tr]) if open_tr else " None"
                 send_telegram(msg)
     except: pass
@@ -200,7 +198,7 @@ def run():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    send_telegram("🚀 BRAHMAND KAVACH V32.0 BRAHMASTRA LIVE\nCompounding + NIFTY Shield + 1-Min Confirm = ON")
+    send_telegram("🚀 BRAHMAND KAVACH V32.1 BRAHMASTRA LIVE\nCompounding + NIFTY Shield + 1-Min Confirm + Rate-Limit Fix = ON")
 
     try:
         df_nse = pd.read_csv(NSE500_URL)
@@ -220,24 +218,28 @@ def run():
                 current_open = conn.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'").fetchone()[0]
                 conn.close()
                 if current_open < max_slots:
-                    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                        futures = {executor.submit(analyze_stock, s): s for s in symbols}
-                        for f in as_completed(futures):
-                            conn = sqlite3.connect(DB_FILE)
-                            now_open = conn.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'").fetchone()[0]
-                            if now_open >= max_slots:
-                                conn.close(); executor.shutdown(wait=False, cancel_futures=True); break
-                            conn.close()
-                            res = f.result()
-                            if res:
+                    # V32.1: बैच में स्कैन करो + गैप दो
+                    for i in range(0, len(symbols), 5): # 5-5 के बैच
+                        batch = symbols[i:i+5]
+                        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                            futures = {executor.submit(analyze_stock, s): s for s in batch}
+                            for f in as_completed(futures):
                                 conn = sqlite3.connect(DB_FILE)
-                                try:
-                                    conn.execute("INSERT INTO trades (symbol, entry, sl, target, qty, status, highest_price, entry_time) VALUES (?,?,?,?,?,?,?,?)",
-                                    (res['symbol'], res['price'], res['sl'], res['target'], res['qty'], "OPEN", res['price'], datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")))
-                                    conn.commit()
-                                    send_telegram(f"🟢 *BUY:* `{res['symbol']}`\n━━━━━━━━━━━━━━━\n💰 Entry: ₹{res['price']:,.2f}\n🛑 SL: ₹{res['sl']:,.2f}\n🎯 Target: ₹{res['target']:,.2f}\n📦 Qty: {res['qty']}")
-                                except: pass
-                                finally: conn.close()
+                                now_open = conn.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'").fetchone()[0]
+                                if now_open >= max_slots:
+                                    conn.close(); executor.shutdown(wait=False, cancel_futures=True); break
+                                conn.close()
+                                res = f.result()
+                                if res:
+                                    conn = sqlite3.connect(DB_FILE)
+                                    try:
+                                        conn.execute("INSERT INTO trades (symbol, entry, sl, target, qty, status, highest_price, entry_time) VALUES (?,?,?,?,?,?,?,?)",
+                                        (res['symbol'], res['price'], res['sl'], res['target'], res['qty'], "OPEN", res['price'], datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")))
+                                        conn.commit()
+                                        send_telegram(f"🟢 *BUY:* `{res['symbol']}`\n━━━━━━━━━━━━━━━\n💰 Entry: ₹{res['price']:,.2f}\n🛑 SL: ₹{res['sl']:,.2f}\n🎯 Target: ₹{res['target']:,.2f}\n📦 Qty: {res['qty']}")
+                                    except: pass
+                                    finally: conn.close()
+                        time.sleep(2) # V32.1: हर बैच के बाद 2 sec का ब्रेक
             time.sleep(SCAN_INTERVAL)
         except Exception as e: logging.error(f"Loop: {e}"); time.sleep(30)
 

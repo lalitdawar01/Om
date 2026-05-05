@@ -1,206 +1,233 @@
 import os
 import time
+import requests
+import json
+from datetime import datetime, timedelta
+from threading import Thread
+from flask import Flask, request
 import telebot
 import yfinance as yf
-from datetime import datetime
-import pytz
-from flask import Flask
-import threading
-import json
-from ta.trend import ADXIndicator
-from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
+import pandas as pd
+import numpy as np
 
+# ======== ENV VARIABLES ========
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
+bot = telebot.TeleBot(BOT_TOKEN)
 
-if not BOT_TOKEN or not CHAT_ID:
-    print("ERROR: BOT_TOKEN or CHAT_ID not set!")
-    exit(1)
+# ======== FLASK APP ========
+app = Flask(__name__)
 
-bot = telebot.TeleBot(BOT_TOKEN, threaded=True)
+@app.route('/')
+def home():
+    return "🚩 जय श्री राम! ब्रह्मास्त्र V32.10 FINAL - Nifty 250 Live है।"
 
-TOTAL_CAPITAL = 100000
-RISK_PER_TRADE = 0.02
-MAX_OPEN_POSITIONS = 5
-IST = pytz.timezone('Asia/Kolkata')
+@app.route('/health')
+def health():
+    return "OK", 200
 
-OPEN_TRADES = {}
-CURRENT_CAPITAL = TOTAL_CAPITAL
-DAILY_EXIT_COUNT = 0
-DAILY_PNL = 0
+# ======== TRADING LOGIC ========
+CAPITAL = 100000
+POSITIONS = {}
+MAX_POSITIONS = 5
 
-NIFTY250_SYMBOLS = [
-'RELIANCE.NS','TCS.NS','HDFCBANK.NS','ICICIBANK.NS','INFY.NS','HINDUNILVR.NS','ITC.NS','SBIN.NS','BHARTIARTL.NS','KOTAKBANK.NS',
-'LT.NS','BAJFINANCE.NS','HCLTECH.NS','ASIANPAINT.NS','MARUTI.NS','AXISBANK.NS','TITAN.NS','SUNPHARMA.NS','ULTRACEMCO.NS','NESTLEIND.NS',
-'WIPRO.NS','ONGC.NS','NTPC.NS','POWERGRID.NS','TATAMOTORS.NS','JSWSTEEL.NS','TECHM.NS','M&M.NS','TATASTEEL.NS','HDFCLIFE.NS',
-'ADANIENT.NS','ADANIPORTS.NS','COALINDIA.NS','SBILIFE.NS','BAJAJFINSV.NS','HINDALCO.NS','GRASIM.NS','CIPLA.NS','DRREDDY.NS','BRITANNIA.NS',
-'EICHERMOT.NS','APOLLOHOSP.NS','DIVISLAB.NS','HEROMOTOCO.NS','BAJAJ-AUTO.NS','INDUSINDBK.NS','UPL.NS','BPCL.NS','SHREECEM.NS','TATACONSUM.NS',
-'PIDILITIND.NS','DABUR.NS','GODREJCP.NS','SIEMENS.NS','DLF.NS','SBICARD.NS','ICICIPRULI.NS','ICICIGI.NS','MARICO.NS','AMBUJACEM.NS',
-'BANDHANBNK.NS','BANKBARODA.NS','BERGEPAINT.NS','BIOCON.NS','BOSCHLTD.NS','CADILAHC.NS','CANBK.NS','CHOLAFIN.NS','COLPAL.NS','CONCOR.NS',
-'CUMMINSIND.NS','DIXON.NS','DMART.NS','FEDERALBNK.NS','GAIL.NS','GLAND.NS','GLENMARK.NS','GODREJPROP.NS','HAVELLS.NS','HDFCAMC.NS',
-'HINDPETRO.NS','IDFCFIRSTB.NS','INDHOTEL.NS','INDUSTOWER.NS','IOC.NS','IRCTC.NS','JINDALSTEL.NS','JUBLFOOD.NS','L&TFH.NS','LALPATHLAB.NS',
-'LICHSGFIN.NS','LTIM.NS','LUPIN.NS','MANAPPURAM.NS','MFSL.NS','MOTHERSON.NS','MPHASIS.NS','MRF.NS','MUTHOOTFIN.NS','NAUKRI.NS',
-'NMDC.NS','OBEROIRLTY.NS','OFSS.NS','PAGEIND.NS','PERSISTENT.NS','PETRONET.NS','PFC.NS','PIIND.NS','PNB.NS','POLYCAB.NS',
-'PVRINOX.NS','RAMCOCEM.NS','RECLTD.NS','SAIL.NS','SRF.NS','SRTRANSFIN.NS','STARHEALTH.NS','TATACHEM.NS','TATACOMM.NS','TATAPOWER.NS',
-'TORNTPHARM.NS','TORNTPOWER.NS','TRENT.NS','TVSMOTOR.NS','UBL.NS','UNIONBANK.NS','VBL.NS','VEDL.NS','VOLTAS.NS','ZYDUSLIFE.NS',
-'ABB.NS','ACC.NS','ABCAPITAL.NS','AARTIIND.NS','ABFRL.NS','ALKEM.NS','ASHOKLEY.NS','ASTRAL.NS','ATUL.NS','AUROPHARMA.NS',
-'BALKRISIND.NS','BALRAMCHIN.NS','BATAINDIA.NS','BEL.NS','BHARATFORG.NS','BHEL.NS','COROMANDEL.NS','CROMPTON.NS','DEEPAKNTR.NS','ESCORTS.NS',
-'EXIDEIND.NS','FORTIS.NS','GUJGASLTD.NS','HAL.NS','HONAUT.NS','IDEA.NS','IDFC.NS','IEX.NS','IGL.NS','INDIAMART.NS',
-'INDIGO.NS','INTELLECT.NS','IPCALAB.NS','IRFC.NS','JKTYRE.NS','JSL.NS','KAJARIACER.NS','KPITTECH.NS','LTTS.NS','MAHABANK.NS',
-'MAHSEAMLES.NS','MAXHEALTH.NS','METROPOLIS.NS','NHPC.NS','OIL.NS','PEL.NS','POONAWALLA.NS','RAJESHEXPO.NS','RBLBANK.NS','RELAXO.NS',
-'RVNL.NS','SHRIRAMFIN.NS','SKFINDIA.NS','SOLARINDS.NS','SONACOMS.NS','SUMICHEM.NS','SUNDARMFIN.NS','SUNDRMFAST.NS','SUNTV.NS','SUPREMEIND.NS',
-'SYNGENE.NS','TATVA.NS','TIMKEN.NS','TTKPRESTIG.NS','UCOBANK.NS','UNOMINDA.NS','VGUARD.NS','VINATIORGA.NS','WHIRLPOOL.NS','YESBANK.NS',
-'ZEEL.NS','ZOMATO.NS','3MINDIA.NS','AIAENG.NS','APLAPOLLO.NS','APTUS.NS','ASAHIINDIA.NS','BSOFT.NS','CAMS.NS','CANFINHOME.NS',
-'CASTROLIND.NS','CGPOWER.NS','CIEINDIA.NS','CLEAN.NS','COFORGE.NS','CRISIL.NS','DELHIVERY.NS','EASEMYTRIP.NS','EMAMILTD.NS','ENDURANCE.NS',
-'FINEORG.NS','FSL.NS','GICRE.NS','GILLETTE.NS','GMRINFRA.NS','GPIL.NS','GSPL.NS','HAPPSTMNDS.NS','HATSUN.NS','HEMIPROP.NS',
-'HUDCO.NS','IIFL.NS','INDIGOPNTS.NS','INFIBEAM.NS','J&KBANK.NS','JINDALSAW.NS','JKLAKSHMI.NS','JSWENERGY.NS','KALYANKJIL.NS','KANSAINER.NS',
-'KEI.NS','KNRCON.NS','KPRMILL.NS','LAXMI.NS','LAURUSLABS.NS','LXCHEM.NS','MEDANTA.NS','MSUMI.NS','MGL.NS','NAVINFLUOR.NS'
-]
+# ======== NIFTY 250 FULL LIST ========
+def get_nifty_250_stocks():
+    return [
+        'ADANIENT.NS', 'ADANIPORTS.NS', 'APOLLOHOSP.NS', 'ASIANPAINT.NS', 'AXISBANK.NS',
+        'BAJAJ-AUTO.NS', 'BAJFINANCE.NS', 'BAJAJFINSV.NS', 'BPCL.NS', 'BHARTIARTL.NS',
+        'BRITANNIA.NS', 'CIPLA.NS', 'COALINDIA.NS', 'DIVISLAB.NS', 'DRREDDY.NS',
+        'EICHERMOT.NS', 'GRASIM.NS', 'HCLTECH.NS', 'HDFCBANK.NS', 'HDFCLIFE.NS',
+        'HEROMOTOCO.NS', 'HINDALCO.NS', 'HINDUNILVR.NS', 'ICICIBANK.NS', 'ITC.NS',
+        'INDUSINDBK.NS', 'INFY.NS', 'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LT.NS',
+        'M&M.NS', 'MARUTI.NS', 'NTPC.NS', 'NESTLEIND.NS', 'ONGC.NS',
+        'POWERGRID.NS', 'RELIANCE.NS', 'SBILIFE.NS', 'SBIN.NS', 'SUNPHARMA.NS',
+        'TCS.NS', 'TATACONSUM.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS', 'TECHM.NS',
+        'TITAN.NS', 'UPL.NS', 'ULTRACEMCO.NS', 'WIPRO.NS', 'VEDL.NS',
+        'ABB.NS', 'ACC.NS', 'AIAENG.NS', 'APLAPOLLO.NS', 'AUBANK.NS',
+        'AARTIIND.NS', 'ABBOTINDIA.NS', 'ABCAPITAL.NS', 'ABFRL.NS', 'ALKEM.NS',
+        'AMBUJACEM.NS', 'ANGELONE.NS', 'APLLTD.NS', 'ASHOKLEY.NS', 'ASTRAL.NS',
+        'ATUL.NS', 'AUROPHARMA.NS', 'DMART.NS', 'BALKRISIND.NS', 'BANDHANBNK.NS',
+        'BANKBARODA.NS', 'BANKINDIA.NS', 'BATAINDIA.NS', 'BAYERCROP.NS', 'BERGEPAINT.NS',
+        'BEL.NS', 'BHARATFORG.NS', 'BHEL.NS', 'BIOCON.NS', 'BOSCHLTD.NS',
+        'BSE.NS', 'CANBK.NS', 'CDSL.NS', 'CESC.NS', 'CGPOWER.NS',
+        'CHAMBLFERT.NS', 'CHOLAFIN.NS', 'CUB.NS', 'COFORGE.NS', 'COLPAL.NS',
+        'CONCOR.NS', 'COROMANDEL.NS', 'CROMPTON.NS', 'CUMMINSIND.NS', 'DALBHARAT.NS',
+        'DEEPAKNTR.NS', 'DELHIVERY.NS', 'DIXON.NS', 'LALPATHLAB.NS', 'EMAMILTD.NS',
+        'ENDURANCE.NS', 'ESCORTS.NS', 'EXIDEIND.NS', 'FEDERALBNK.NS', 'FORTIS.NS',
+        'GAIL.NS', 'GMRINFRA.NS', 'GLENMARK.NS', 'GODREJCP.NS', 'GODREJPROP.NS',
+        'GRANULES.NS', 'GUJGASLTD.NS', 'GSPL.NS', 'HAL.NS', 'HAVELLS.NS',
+        'HDFCAMC.NS', 'HINDPETRO.NS', 'HONAUT.NS', 'HUDCO.NS', 'ICIGI.NS',
+        'ICICIPRULI.NS', 'IEX.NS', 'IGL.NS', 'IDFCFIRSTB.NS', 'INDHOTEL.NS',
+        'INDIAMART.NS', 'INDIANB.NS', 'ISEC.NS', 'INDUSTOWER.NS', 'NAUKRI.NS',
+        'INDIGO.NS', 'IPCALAB.NS', 'IRCTC.NS', 'IRFC.NS', 'JINDALSTEL.NS',
+        'JKCEMENT.NS', 'JSL.NS', 'JUBLFOOD.NS', 'KAJARIACER.NS', 'KPITTECH.NS',
+        'KPRMILL.NS', 'L&TFH.NS', 'LTTS.NS', 'LICHSGFIN.NS', 'LAURUSLABS.NS',
+        'LICI.NS', 'LTIM.NS', 'LUPIN.NS', 'M&MFIN.NS', 'MANAPPURAM.NS',
+        'MRF.NS', 'MGL.NS', 'MUTHOOTFIN.NS', 'NAM-INDIA.NS', 'NHPC.NS',
+        'NMDC.NS', 'OBEROIRLTY.NS', 'OFSS.NS', 'OIL.NS', 'PAYTM.NS',
+        'PAGEIND.NS', 'PERSISTENT.NS', 'PETRONET.NS', 'PFIZER.NS', 'PIDILITIND.NS',
+        'PIIND.NS', 'PNB.NS', 'POLYCAB.NS', 'POONAWALLA.NS', 'PVRINOX.NS',
+        'RAMCOCEM.NS', 'RBLBANK.NS', 'RECLTD.NS', 'SAIL.NS', 'SHREECEM.NS',
+        'SRF.NS', 'MOTHERSON.NS', 'SHRIRAMFIN.NS', 'SIEMENS.NS', 'SONACOMS.NS',
+        'SBICARD.NS', 'SUNDARMFIN.NS', 'SUNDRMFAST.NS', 'SYNGENE.NS', 'TATACOMM.NS',
+        'TATAPOWER.NS', 'TORNTPHARM.NS', 'TORNTPOWER.NS', 'TRENT.NS', 'TRIDENT.NS',
+        'TVSMOTOR.NS', 'UNIONBANK.NS', 'IDEA.NS', 'UCOBANK.NS', 'UBL.NS',
+        'MCDOWELL-N.NS', 'UNITDSPR.NS', 'VGUARD.NS', 'VBL.NS', 'VOLTAS.NS',
+        'WHIRLPOOL.NS', 'YESBANK.NS', 'ZEEL.NS', 'ZYDUSLIFE.NS', 'NYKAA.NS',
+        'ZOMATO.NS', 'POLICYBZR.NS', 'AFFLE.NS', 'AMARAJABAT.NS', 'APL.NS',
+        'AEGISCHEM.NS', 'BALAMINES.NS', 'BDL.NS', 'BHARATDYNAM.NS', 'BIRLACORPN.NS',
+        'BLUESTARCO.NS', 'BRIGADE.NS', 'CARBORUNIV.NS', 'CCL.NS', 'CENTRALBK.NS',
+        'CHALET.NS', 'COCHINSHIP.NS', 'CYIENT.NS', 'DCMSHRIRAM.NS', 'DELTACORP.NS',
+        'EASEMYTRIP.NS', 'EIDPARRY.NS', 'ELECON.NS', 'ELGIEQUIP.NS', 'ENGINERSIN.NS',
+        'EQUITAS.NS', 'ERIS.NS', 'FINEORG.NS', 'FINCABLES.NS', 'FINPIPE.NS',
+        'FSL.NS', 'FIVESTAR.NS', 'GAEL.NS', 'GESHIP.NS', 'GLAXO.NS',
+        'GNFC.NS', 'GPIL.NS', 'GODFRYPHLP.NS', 'GRAPHITE.NS', 'GREAVESCOT.NS',
+        'GRINDWELL.NS', 'GULFOILLUB.NS', 'HATSUN.NS', 'HEG.NS', 'HINDCOPPER.NS',
+        'HONASA.NS', 'HFCL.NS', 'IIFL.NS', 'INOXWIND.NS', 'INTELLECT.NS',
+        'ITI.NS', 'J&KBANK.NS', 'JBCHEPHARM.NS', 'JKLAKSHMI.NS', 'JKTYRE.NS',
+        'JUBLINGREA.NS', 'JUSTDIAL.NS', 'JYOTHYLAB.NS', 'KALYANKJIL.NS', 'KANSAINER.NS',
+        'KEI.NS', 'KIRLOSENG.NS', 'KNRCON.NS', 'LAXMIMACH.NS', 'LXCHEM.NS',
+        'LEMONTREE.NS', 'LINDEINDIA.NS', 'LLOYDSME.NS', 'MAHABANK.NS', 'MAHLIFE.NS',
+        'MANKIND.NS', 'MARICO.NS', 'MAZDOCK.NS', 'METROPOLIS.NS', 'MFSL.NS',
+        'MPHASIS.NS', 'MRPL.NS', 'NATCOPHARM.NS', 'NAVINFLUOR.NS', 'NCC.NS',
+        'NESTLEIND.NS', 'NLCINDIA.NS', 'NSLNISP.NS', 'OBEROIRLTY.NS', 'OLECTRA.NS',
+        'PATANJALI.NS', 'PCBL.NS', 'PEL.NS', 'PFC.NS', 'PNBHOUSING.NS',
+        'POLYMED.NS', 'PRAJIND.NS', 'PRSMJOHNSN.NS', 'QUESS.NS', 'RADICO.NS',
+        'RAILTEL.NS', 'RALLIS.NS', 'RAYMOND.NS', 'REDINGTON.NS', 'RENUKA.NS',
+        'RHIM.NS', 'RTNPOWER.NS', 'SAFARI.NS', 'SANOFI.NS', 'SCHAEFFLER.NS',
+        'SHARDACROP.NS', 'SJVN.NS', 'SKFINDIA.NS', 'SOLARINDS.NS', 'SOMANYCERA.NS',
+        'SONATSOFTW.NS', 'STARHEALTH.NS', 'SUMICHEM.NS', 'SUNTECK.NS', 'SUPREMEIND.NS',
+        'SURYAROSNI.NS', 'SUVENPHAR.NS', 'SUZLON.NS', 'SWANENERGY.NS', 'SYRMA.NS',
+        'TANLA.NS', 'TEJASNET.NS', 'THYROCARE.NS', 'TIMKEN.NS', 'TRIVENI.NS',
+        'TTKPRESTIG.NS', 'UNOMINDA.NS', 'UJJIVANSFB.NS', 'USHAMART.NS', 'VTL.NS',
+        'WELCORP.NS', 'WELSPUNLIV.NS', 'WESTLIFE.NS', 'WOCKPHARMA.NS', 'ZENSARTECH.NS'
+    ]
 
-def recover_data():
-    global CURRENT_CAPITAL, OPEN_TRADES, DAILY_PNL, DAILY_EXIT_COUNT
+def send_telegram_message(text):
     try:
-        updates = bot.get_updates(limit=50, timeout=5)
-        for update in reversed(updates):
-            if update.message and "💾 BACKUP_DATA:" in update.message.text:
-                data = json.loads(update.message.text.split("💾 BACKUP_DATA:")[1])
-                CURRENT_CAPITAL = data.get('capital', TOTAL_CAPITAL)
-                OPEN_TRADES = data.get('trades', {})
-                DAILY_PNL = data.get('daily_pnl', 0)
-                DAILY_EXIT_COUNT = data.get('daily_exit_count', 0)
-                bot.send_message(CHAT_ID, f"✅ रिकवरी सफल! Capital: ₹{CURRENT_CAPITAL:,.2f}")
-                return
-    except: pass
+        bot.send_message(CHAT_ID, text, parse_mode='Markdown')
+    except Exception as e:
+        print(f"Telegram Error: {e}")
 
-def save_state():
+def calculate_ema(data, period):
+    return data['Close'].ewm(span=period, adjust=False).mean()
+
+def calculate_rsi(data, period=14):
+    delta = data['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def check_buy_signal(symbol):
     try:
-        data = {'capital': CURRENT_CAPITAL,'trades': OPEN_TRADES,'daily_pnl': DAILY_PNL,'daily_exit_count': DAILY_EXIT_COUNT}
-        bot.send_message(CHAT_ID, f"💾 BACKUP_DATA:{json.dumps(data)}")
-    except: pass
+        data = yf.download(symbol, period='60d', interval='1d', progress=False)
+        if len(data) < 50:
+            return False, None
+        data['EMA9'] = calculate_ema(data, 9)
+        data['EMA21'] = calculate_ema(data, 21)
+        data['RSI'] = calculate_rsi(data, 14)
+        latest = data.iloc[-1]
+        prev = data.iloc[-2]
+        if (latest['EMA9'] > latest['EMA21'] and
+            prev['EMA9'] <= prev['EMA21'] and
+            latest['RSI'] > 50):
+            return True, latest['Close']
+        return False, None
+    except Exception as e:
+        print(f"Error checking {symbol}: {e}")
+        return False, None
 
-def get_nifty_trend():
-    try:
-        n = yf.download("^NSEI", period="2d", interval="15m", progress=False)
-        if n.empty or len(n) < 50: return "SIDEWAYS"
-        ema50 = n['Close'].ewm(span=50).mean().iloc[-1]
-        return "BULLISH" if n['Close'].iloc[-1] > ema50 else "BEARISH"
-    except: return "SIDEWAYS"
+def scan_stocks():
+    if len(POSITIONS) >= MAX_POSITIONS:
+        return
+    stocks = get_nifty_250_stocks()
+    for stock in stocks:
+        if len(POSITIONS) >= MAX_POSITIONS:
+            break
+        if stock in POSITIONS:
+            continue
+        buy_signal, price = check_buy_signal(stock)
+        if buy_signal and price:
+            qty = int((CAPITAL * 0.2) / price)
+            if qty > 0:
+                POSITIONS[stock] = {
+                    'buy_price': price,
+                    'qty': qty,
+                    'sl': price * 0.98,
+                    'target': price * 1.04,
+                    'time': datetime.now()
+                }
+                msg = f"🚀 *BUY SIGNAL* 🚀\n\n*Stock:* `{stock}`\n*Price:* ₹{price:.2f}\n*Qty:* {qty}\n*SL:* ₹{price * 0.98:.2f}\n*Target:* ₹{price * 1.04:.2f}"
+                send_telegram_message(msg)
+        time.sleep(1) # API rate limit से बचने के लिए
 
-def scan_and_buy():
-    global CURRENT_CAPITAL
-    if get_nifty_trend()!= "BULLISH" or len(OPEN_TRADES) >= MAX_OPEN_POSITIONS: return
-    for symbol in NIFTY250_SYMBOLS:
-        if symbol in OPEN_TRADES: continue
+def check_positions():
+    stocks_to_remove = []
+    for stock, pos in POSITIONS.items():
         try:
-            df = yf.download(symbol, period="60d", interval="1d", progress=False)
-            if len(df) < 30: continue
-            close, high, low = df['Close'], df['High'], df['Low']
-            rsi = RSIIndicator(close, 14).rsi().iloc[-1]
-            adx = ADXIndicator(high, low, close, 14).adx().iloc[-1]
-            atr = AverageTrueRange(high, low, close, 14).average_true_range().iloc[-1]
-            ema20 = close.ewm(span=20).mean().iloc[-1]
-            price = close.iloc[-1]
-            if adx > 25 and rsi > 55 and price > ema20:
-                risk_amt = TOTAL_CAPITAL * RISK_PER_TRADE
-                sl = price - (atr * 1.5)
-                target = price + (atr * 3.0)
-                if price <= sl: continue
-                qty = int(risk_amt / (price - sl))
-                if qty > 0 and (qty * price) <= CURRENT_CAPITAL:
-                    OPEN_TRADES[symbol] = {'entry': round(float(price), 2), 'qty': int(qty), 'sl': round(float(sl), 2), 'target': round(float(target), 2)}
-                    CURRENT_CAPITAL -= (qty * price)
-                    bot.send_message(CHAT_ID, f"📝 **BUY ALERT**\n🚀 {symbol}\nQty: {qty}\nEntry: ₹{price:.2f}\nSL: ₹{sl:.2f}\nTarget: ₹{target:.2f}")
-                    save_state()
-                    if len(OPEN_TRADES) >= MAX_OPEN_POSITIONS: break
-        except: continue
+            data = yf.download(stock, period='1d', interval='5m', progress=False)
+            if data.empty:
+                continue
+            ltp = data['Close'].iloc[-1]
+            if ltp >= pos['target']:
+                pnl = (ltp - pos['buy_price']) * pos['qty']
+                msg = f"🎯 *TARGET HIT* 🎯\n\n*Stock:* `{stock}`\n*Buy:* ₹{pos['buy_price']:.2f}\n*Sell:* ₹{ltp:.2f}\n*Qty:* {pos['qty']}\n*P&L:* ₹{pnl:.2f}"
+                send_telegram_message(msg)
+                stocks_to_remove.append(stock)
+            elif ltp <= pos['sl']:
+                pnl = (ltp - pos['buy_price']) * pos['qty']
+                msg = f"🛑 *STOP LOSS HIT* 🛑\n\n*Stock:* `{stock}`\n*Buy:* ₹{pos['buy_price']:.2f}\n*Sell:* ₹{ltp:.2f}\n*Qty:* {pos['qty']}\n*P&L:* ₹{pnl:.2f}"
+                send_telegram_message(msg)
+                stocks_to_remove.append(stock)
+        except Exception as e:
+            print(f"Error checking position {stock}: {e}")
+    for stock in stocks_to_remove:
+        del POSITIONS[stock]
 
-def manage_exits():
-    global CURRENT_CAPITAL, DAILY_PNL, DAILY_EXIT_COUNT
-    to_delete = []
-    for s, t in list(OPEN_TRADES.items()):
-        try:
-            df = yf.download(s, period="1d", interval="5m", progress=False)
-            if df.empty: continue
-            curr = df['Close'].iloc[-1]
-            reason = None
-            if curr <= t['sl']: reason = "SL HIT 🛑"
-            elif curr >= t['target']: reason = "TARGET HIT 🎯"
-            if reason:
-                pnl = (curr - t['entry']) * t['qty']
-                CURRENT_CAPITAL += (t['qty'] * curr)
-                DAILY_PNL += pnl
-                DAILY_EXIT_COUNT += 1
-                bot.send_message(CHAT_ID, f"📉 **EXIT ALERT: {s}**\n{reason}\nExit: ₹{curr:.2f}\nP&L: ₹{pnl:.2f}")
-                to_delete.append(s)
-        except: continue
-    for s in to_delete:
-        if s in OPEN_TRADES: del OPEN_TRADES[s]
-    if to_delete: save_state()
+def scheduler():
+    while True:
+        now = datetime.now()
+        if now.weekday() < 5 and 9 <= now.hour < 16:
+            if now.hour == 9 and now.minute < 20:
+                time.sleep(60)
+                continue
+            scan_stocks()
+            check_positions()
+        time.sleep(300)
 
 @bot.message_handler(commands=['start', 'status'])
-def send_status(message):
-    if str(message.chat.id)!= str(CHAT_ID): return
-    nifty_trend = get_nifty_trend()
-    status_msg = (f"🚀 **V32.9 SAMPURNA - NIFTY 250**\n\n"
-                  f"💰 Total Capital: ₹{CURRENT_CAPITAL:,.2f}\n"
-                  f"📊 Open Positions: {len(OPEN_TRADES)}/{MAX_OPEN_POSITIONS}\n"
-                  f"📈 आज का P&L: ₹{DAILY_PNL:,.2f}\n"
-                  f"🔄 आज क्लोज्ड: {DAILY_EXIT_COUNT}\n"
-                  f"🛡️ NIFTY Trend: {nifty_trend}\n"
-                  f"📋 Scan List: 250 Stocks\n\n"
-                  f"जय श्री राम! 🚩")
-    bot.send_message(CHAT_ID, status_msg)
-
-@bot.message_handler(commands=['portfolio'])
-def send_portfolio(message):
-    if str(message.chat.id)!= str(CHAT_ID): return
-    if not OPEN_TRADES:
-        bot.send_message(CHAT_ID, "📊 **PORTFOLIO**\n\nकोई ओपन पोजीशन नहीं है।")
+def handle_start(message):
+    if str(message.chat.id)!= CHAT_ID:
         return
-    msg = "📊 **PORTFOLIO**\n\n"
-    for s, t in OPEN_TRADES.items():
-        msg += f"🚀 {s}\nQty: {t['qty']} | Entry: ₹{t['entry']:.2f}\nSL: ₹{t['sl']:.2f} | Target: ₹{t['target']:.2f}\n\n"
-    bot.send_message(CHAT_ID, msg)
+    status_msg = f"🚀 *V32.10 FINAL - NIFTY 250*\n\n💰 *Total Capital:* ₹{CAPITAL:,.2f}\n📊 *Open Positions:* {len(POSITIONS)}/{MAX_POSITIONS}\n📈 *Scanning:* 250 Stocks\n\n"
+    if POSITIONS:
+        for stock, pos in POSITIONS.items():
+            try:
+                ltp = yf.Ticker(stock).history(period='1d')['Close'].iloc[-1]
+                pnl = (ltp - pos['buy_price']) * pos['qty']
+                status_msg += f"*{stock}*\nBuy: ₹{pos['buy_price']:.2f} | LTP: ₹{ltp:.2f}\nP&L: ₹{pnl:.2f}\n\n"
+            except:
+                status_msg += f"*{stock}*\nBuy: ₹{pos['buy_price']:.2f}\n\n"
+    else:
+        status_msg += "कोई पोजीशन नहीं है। मार्केट स्कैन चालू है..."
+    bot.reply_to(message, status_msg, parse_mode='Markdown')
 
-report_sent = False
-def scheduler():
-    global report_sent
-    recover_data()
-    while True:
-        try:
-            now = datetime.now(IST)
-            if now.weekday() < 5:
-                if 9*60+15 <= now.hour*60+now.minute <= 15*60+30:
-                    manage_exits()
-                    if now.minute % 15 == 0: scan_and_buy()
-                    report_sent = False
-                if now.hour == 15 and now.minute == 35 and not report_sent:
-                    today = datetime.now(IST).strftime("%d-%b-%Y")
-                    msg = (f"🏁 **डेली क्लोजिंग रिपोर्ट - {today}**\n\n"
-                           f"💰 करंट कैपिटल: ₹{CURRENT_CAPITAL:,.2f}\n"
-                           f"📊 आज का P&L: ₹{DAILY_PNL:,.2f}\n"
-                           f"🔄 क्लोज्ड ट्रेड्स: {DAILY_EXIT_COUNT}\n"
-                           f"📌 ओपन पोजीशन: {len(OPEN_TRADES)}\n\n"
-                           f"जय श्री राम! कल मिलते हैं। 🙏")
-                    bot.send_message(CHAT_ID, msg)
-                    report_sent = True
-        except: pass
-        time.sleep(60)
+@bot.message_handler(func=lambda message: True)
+def handle_all(message):
+    if str(message.chat.id) == CHAT_ID and message.text == '#status':
+        handle_start(message)
 
-app = Flask('')
-@app.route('/')
-def home(): return "V32.9 Active"
-def run_flask(): app.run(host='0.0.0.0', port=10000)
+# ======== BOT START FUNCTION ========
+def run_bot():
+    print("🚩 जय श्री राम! ब्रह्मास्त्र V32.10 FINAL चालू है।")
+    send_telegram_message("🚩 जय श्री राम! ब्रह्मास्त्र V32.10 FINAL चालू है।\n📈 *Nifty 250 Scanning Started*")
+    Thread(target=scheduler).start()
+    bot.infinity_polling()
 
-if __name__ == "__main__":
-    os.system("pkill -f 'python.*main.py'")
-    time.sleep(1)
-    threading.Thread(target=run_flask, daemon=True).start()
-    threading.Thread(target=scheduler, daemon=True).start()
-    try:
-        bot.remove_webhook()
-        time.sleep(1)
-        bot.send_message(CHAT_ID, "🚩 जय श्री राम! ब्रह्मास्त्र V32.9 NIFTY 250 चालू है।")
-    except: pass
-    bot.infinity_polling(skip_pending=True, timeout=20)
+# ======== START BOT IN BACKGROUND ========
+Thread(target=run_bot).start()
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)

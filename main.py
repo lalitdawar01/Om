@@ -1,246 +1,195 @@
-
 import os
 import time
-import sqlite3
-import threading
-import logging
-import warnings
-import random
-from datetime import datetime, timedelta
+import telebot
 import pandas as pd
-import requests
 import yfinance as yf
-import ta
+from datetime import datetime
 import pytz
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask
+import threading
+import sqlite3
+from ta.trend import ADXIndicator
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
 
-warnings.filterwarnings("ignore")
-IST = pytz.timezone("Asia/Kolkata")
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DB_FILE = "brahmand_kavach_v32.db"
-NSE500_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+# ========== CONFIG ==========
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+CHAT_ID = os.environ.get('CHAT_ID') 
+bot = telebot.TeleBot(BOT_TOKEN)
 
-BASE_CAPITAL = 100000
-RISK_PER_TRADE = 0.015
-SCAN_INTERVAL = 1800
-MAX_WORKERS = 2 # V32.1: 2 ही रखो, ज्यादा से Rate Limit आएगी
+# V32.2 SETTINGS
+TOTAL_CAPITAL = 100000 # अपना कैपिटल
+MAX_OPEN_POSITIONS = 5
+RISK_PER_TRADE = 0.02 # 2% रिस्क
+STOP_LOSS_ATR_MULT = 1.5
+TARGET_ATR_MULT = 3.0
+SCAN_INTERVAL = 300 # 5 मिनट = 300 सेकंड
+MAX_WORKERS = 5 # V32.1 Rate Limit Fix
 
-LAST_GREETING_DATE = None
-LAST_REPORT_DATE = None
-LAST_UPDATE_ID = 0
+# NIFTY 50 LIST - CSV की जरूरत नहीं V32.2 में
+NIFTY50_SYMBOLS = [
+    'ADANIENT.NS', 'ADANIPORTS.NS', 'APOLLOHOSP.NS', 'ASIANPAINT.NS', 'AXISBANK.NS',
+    'BAJAJ-AUTO.NS', 'BAJFINANCE.NS', 'BAJAJFINSV.NS', 'BPCL.NS', 'BHARTIARTL.NS',
+    'BRITANNIA.NS', 'CIPLA.NS', 'COALINDIA.NS', 'DIVISLAB.NS', 'DRREDDY.NS',
+    'EICHERMOT.NS', 'GRASIM.NS', 'HCLTECH.NS', 'HDFCBANK.NS', 'HDFCLIFE.NS',
+    'HEROMOTOCO.NS', 'HINDALCO.NS', 'HINDUNILVR.NS', 'ICICIBANK.NS', 'ITC.NS',
+    'INDUSINDBK.NS', 'INFY.NS', 'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LTIM.NS',
+    'LT.NS', 'M&M.NS', 'MARUTI.NS', 'NTPC.NS', 'NESTLEIND.NS',
+    'ONGC.NS', 'POWERGRID.NS', 'RELIANCE.NS', 'SBILIFE.NS', 'SBIN.NS',
+    'SUNPHARMA.NS', 'TCS.NS', 'TATACONSUM.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS',
+    'TECHM.NS', 'TITAN.NS', 'ULTRACEMCO.NS', 'UPL.NS', 'WIPRO.NS'
+]
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-
-def send_telegram(message):
-    if not BOT_TOKEN or not CHAT_ID: return
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-        requests.post(url, data=payload, timeout=15)
-    except Exception as e: logging.error(f"Telegram Error: {e}")
-
-def get_pnl_report(days=1):
-    conn = sqlite3.connect(DB_FILE)
-    since_date = (datetime.now(IST) - timedelta(days=days)).strftime("%Y-%m-%d")
-    rows = conn.execute("SELECT symbol, pnl FROM trades WHERE status='CLOSED' AND exit_time >=?", (since_date,)).fetchall()
-    conn.close()
-    if not rows: return "आज कोई ट्रेड क्लोज नहीं हुआ।"
-    total_pnl = sum(r[1] for r in rows)
-    detail = "\n".join([f"🔹 {r[0]}: ₹{r[1]:,.2f}" for r in rows])
-    return f"{detail}\n\n💰 Total P&L: ₹{total_pnl:,.2f}"
-
-def check_special_messages():
-    global LAST_GREETING_DATE, LAST_REPORT_DATE
-    now = datetime.now(IST)
-    today = now.strftime("%Y-%m-%d")
-    if now.hour == 9 and now.minute >= 30 and LAST_GREETING_DATE!= today:
-        send_telegram("🚩 जय श्री राम, ललित जी! \nमार्केट खुल गया है। आपका दिन मंगलमय और प्रॉफिटेबल हो। 🙏")
-        LAST_GREETING_DATE = today
-    if now.hour == 15 and now.minute >= 35 and LAST_REPORT_DATE!= today:
-        report = get_pnl_report(1)
-        send_telegram(f"📉 आज की क्लोजिंग रिपोर्ट: \n\n{report}")
-        LAST_REPORT_DATE = today
-
-def get_dynamic_config():
-    conn = sqlite3.connect(DB_FILE)
-    total_pnl = conn.execute("SELECT SUM(pnl) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0
-    conn.close()
-    current_total_cap = BASE_CAPITAL + total_pnl
-    max_slots = 5 + max(0, int(total_pnl // 100000))
-    return current_total_cap, max_slots
-
-def get_available_capital():
-    total_cap, _ = get_dynamic_config()
-    conn = sqlite3.connect(DB_FILE)
-    rows = conn.execute("SELECT entry, qty FROM trades WHERE status='OPEN'").fetchall()
-    conn.close()
-    invested = sum(entry * qty for entry, qty in rows)
-    return max(0, total_cap - invested)
-
+# ========== DATABASE ==========
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("""CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, entry REAL NOT NULL,
-    sl REAL NOT NULL, target REAL NOT NULL, qty INTEGER NOT NULL, status TEXT NOT NULL,
-    highest_price REAL, entry_time TEXT, exit_time TEXT, pnl REAL DEFAULT 0)""")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_open_symbol ON trades(symbol) WHERE status='OPEN'")
-    conn.commit(); conn.close()
+    conn = sqlite3.connect('trades.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS trades
+                 (id INTEGER PRIMARY KEY, symbol TEXT, entry_price REAL, qty INTEGER, 
+                  sl REAL, target REAL, status TEXT, entry_time TEXT, exit_time TEXT, pnl REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS capital
+                 (id INTEGER PRIMARY KEY, total_capital REAL, available_capital REAL)''')
+    c.execute("INSERT OR IGNORE INTO capital (id, total_capital, available_capital) VALUES (1,?,?)", 
+              (TOTAL_CAPITAL, TOTAL_CAPITAL))
+    conn.commit()
+    conn.close()
 
-def nifty_bear_check():
+# ========== CORE LOGIC ==========
+def get_nifty_trend():
     try:
-        time.sleep(0.5) # V32.1: Rate limit से बचाव
         nifty = yf.Ticker("^NSEI")
-        hist = nifty.history(period="100d")
-        if hist.empty: return False
-        ema50 = hist["Close"].ewm(span=50).mean().iloc[-1]
-        price = hist["Close"].iloc[-1]
-        return price < ema50
-    except: return False
+        hist = nifty.history(period="1d", interval="5m")
+        if len(hist) < 20: return "SIDEWAYS"
+        sma20 = hist['Close'].rolling(20).mean().iloc[-1]
+        last_close = hist['Close'].iloc[-1]
+        if last_close > sma20: return "BULLISH"
+        elif last_close < sma20: return "BEARISH"
+        return "SIDEWAYS"
+    except: return "SIDEWAYS"
 
-def one_min_confirmation(symbol):
-    try:
-        time.sleep(0.5) # V32.1: Rate limit से बचाव
-        df = yf.download(symbol, period="1d", interval="1m", progress=False, auto_adjust=True)
-        if df.empty: return False
-        return df["Close"].iloc[-1] > df["High"].iloc[-10:-1].max()
-    except: return False
+def scan_stocks():
+    nifty_trend = get_nifty_trend()
+    if nifty_trend!= "BULLISH": 
+        print("NIFTY Shield: Market not bullish. Skipping scan.")
+        return []
+    
+    selected = []
+    # V32.1 FIX: 5-5 के बैच में चलाओ + 2 sec गैप
+    for i in range(0, len(NIFTY50_SYMBOLS), MAX_WORKERS):
+        batch = NIFTY50_SYMBOLS[i:i+MAX_WORKERS]
+        for symbol in batch:
+            try:
+                df = yf.download(symbol, period="60d", interval="1d", progress=False)
+                if len(df) < 30: continue
+                
+                df['ADX'] = ADXIndicator(df['High'], df['Low'], df['Close'], 14).adx()
+                df['RSI'] = RSIIndicator(df['Close'], 14).rsi()
+                df['ATR'] = AverageTrueRange(df['High'], df['Low'], df['Close'], 14).average_true_range()
+                
+                last = df.iloc[-1]
+                if last['ADX'] > 25 and last['RSI'] > 55 and last['Close'] > df['Close'].rolling(20).mean().iloc[-1]:
+                    selected.append({
+                        'symbol': symbol, 
+                        'price': last['Close'], 
+                        'atr': last['ATR']
+                    })
+            except Exception as e:
+                print(f"Error {symbol}: {e}")
+                continue
+        time.sleep(2) # V32.1 Rate Limit Fix
+    
+    return selected[:MAX_OPEN_POSITIONS]
 
-def analyze_stock(symbol):
-    try:
-        if nifty_bear_check(): return None
-        time.sleep(random.uniform(1.0, 2.0)) # V32.1: Random delay 1-2 sec
-        df = yf.download(symbol, period="1y", interval="1d", progress=False, auto_adjust=True, threads=False)
-        if df.empty or len(df) < 220: return None
+def execute_trades(stocks):
+    conn = sqlite3.connect('trades.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'")
+    open_count = c.fetchone()[0]
+    
+    c.execute("SELECT available_capital FROM capital WHERE id=1")
+    available = c.fetchone()[0]
+    
+    for stock in stocks:
+        if open_count >= MAX_OPEN_POSITIONS: break
+        
+        risk_amount = TOTAL_CAPITAL * RISK_PER_TRADE
+        sl = stock['price'] - (stock['atr'] * STOP_LOSS_ATR_MULT)
+        qty = int(risk_amount / (stock['price'] - sl))
+        if qty == 0: continue
+        
+        investment = qty * stock['price']
+        if investment > available: continue
+        
+        target = stock['price'] + (stock['atr'] * TARGET_ATR_MULT)
+        
+        c.execute("INSERT INTO trades (symbol, entry_price, qty, sl, target, status, entry_time) VALUES (?,?,?,?,?, 'OPEN',?)",
+                  (stock['symbol'], stock['price'], qty, sl, target, datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d %H:%M")))
+        
+        available -= investment
+        open_count += 1
+        
+        bot.send_message(CHAT_ID, f"🟢 BUY: {stock['symbol']}\nQty: {qty}\nEntry: ₹{stock['price']:.2f}\nSL: ₹{sl:.2f}\nTarget: ₹{target:.2f}")
+    
+    c.execute("UPDATE capital SET available_capital=? WHERE id=1", (available,))
+    conn.commit()
+    conn.close()
 
-        close, high, low, vol = df["Close"], df["High"], df["Low"], df["Volume"]
-        ema50 = close.ewm(span=50).mean()
-        ema200 = close.ewm(span=200).mean()
-        rsi = ta.momentum.RSIIndicator(close, 14).rsi()
-        adx = ta.trend.ADXIndicator(high, low, close, 14).adx()
-        atr = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
-        price = float(close.iloc[-1])
-        ema_slope = (ema50.iloc[-1] - ema50.iloc[-5]) / ema50.iloc[-5] * 100
-        vol_breakout = vol.iloc[-1] > vol.rolling(20).mean().iloc[-1] * 2.5
-        bullish = price > ema50.iloc[-1] > ema200.iloc[-1]
-        momentum = (50 < rsi.iloc[-1] < 66) and (adx.iloc[-1] > 25) and (ema_slope > 0.2)
+def run_scan():
+    print("Starting scan...")
+    stocks = scan_stocks()
+    if stocks: execute_trades(stocks)
+    else: print("No stocks selected")
 
-        if bullish and momentum and vol_breakout:
-            if not one_min_confirmation(symbol): return None
-            current_cap, max_slots = get_dynamic_config()
-            available_cap = get_available_capital()
-            if available_cap < price: return None
-            sl = round(price - (2 * atr.iloc[-1]), 2)
-            target = round(price + (4 * atr.iloc[-1]), 2)
-            risk_qty = int((current_cap * RISK_PER_TRADE) / (price - sl))
-            capital_qty = int((available_cap / max_slots) / price)
-            qty = min(risk_qty, capital_qty)
-            if qty > 0: return {"symbol": symbol, "price": round(price, 2), "sl": sl, "target": target, "qty": qty}
-    except: return None
+# ========== TELEGRAM COMMANDS ==========
+@bot.message_handler(commands=['status'])
+def send_status(message):
+    conn = sqlite3.connect('trades.db')
+    c = conn.cursor()
+    c.execute("SELECT available_capital FROM capital WHERE id=1")
+    available = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'")
+    open_pos = c.fetchone()[0]
+    c.execute("SELECT SUM(pnl) FROM trades WHERE status='CLOSED'")
+    net_pnl = c.fetchone()[0] or 0
+    conn.close()
+    
+    msg = f"🚀 **BRAHMAND KAVACH V32.2**\n\n💰 Total Capital: ₹{TOTAL_CAPITAL:,}\n💵 Available: ₹{available:,.2f}\n📊 Slots: {open_pos}/{MAX_OPEN_POSITIONS}\n💹 Net P&L: ₹{net_pnl:,.2f}\n\n"
+    
+    if open_pos > 0:
+        c = sqlite3.connect('trades.db').cursor()
+        c.execute("SELECT symbol, entry_price, qty FROM trades WHERE status='OPEN'")
+        msg += "**Open Positions:**\n"
+        for row in c.fetchall():
+            msg += f"🔹 {row[0]}: {row[2]} @ ₹{row[1]:.2f}\n"
+    else:
+        msg += "**Open Positions:**\nNone"
+    
+    bot.reply_to(message, msg)
 
-def manage_exits():
-    conn = sqlite3.connect(DB_FILE)
-    trades = conn.execute("SELECT id, symbol, entry, sl, target, qty, highest_price FROM trades WHERE status='OPEN'").fetchall()
-    for tid, sym, entry, current_sl, target, qty, high_price in trades:
-        try:
-            time.sleep(1) # V32.1: Rate limit से बचाव
-            df = yf.download(sym, period="2d", interval="5m", progress=False, auto_adjust=True, threads=False)
-            if df.empty: continue
-            current = float(df["Close"].iloc[-1])
-            if current > high_price:
-                high_price = current
-                new_sl = max(current_sl, high_price * 0.97)
-                conn.execute("UPDATE trades SET sl=?, highest_price=? WHERE id=?", (new_sl, high_price, tid))
-                current_sl = new_sl
-            reason = "Trailing SL 🛑" if current <= current_sl else "Target 🎯" if current >= target else None
-            if reason:
-                pnl = round((current - entry) * qty, 2)
-                conn.execute("UPDATE trades SET status='CLOSED', exit_time=?, pnl=? WHERE id=?", (datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"), pnl, tid))
-                send_telegram(f"🔴 EXIT: {sym} | {reason}\nPrice: ₹{current:.2f} | P&L: ₹{pnl:.2f}")
-        except: continue
-    conn.commit(); conn.close()
-
-def check_telegram_commands():
-    global LAST_UPDATE_ID
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-        res = requests.get(url, params={"offset": LAST_UPDATE_ID, "timeout": 1}, timeout=5).json()
-        for up in res.get("result", []):
-            LAST_UPDATE_ID = up["update_id"] + 1
-            if str(up.get("message", {}).get("chat", {}).get("id"))!= str(CHAT_ID): continue
-            text = up.get("message", {}).get("text", "").strip().lower()
-            if text == "#status":
-                cap, slots = get_dynamic_config()
-                avail = get_available_capital()
-                conn = sqlite3.connect(DB_FILE)
-                net_pnl = conn.execute("SELECT SUM(pnl) FROM trades WHERE status='CLOSED'").fetchone()[0] or 0
-                open_tr = conn.execute("SELECT symbol, entry FROM trades WHERE status='OPEN'").fetchall()
-                conn.close()
-                msg = f"📊 BRAHMAND KAVACH V32.1\n💰 Total Capital: ₹{cap:,.0f}\n💵 Available: ₹{avail:,.0f}\n📦 Slots: {len(open_tr)}/{slots}\n💹 Net P&L: ₹{net_pnl:,.2f}\n\n📦 Open Positions:"
-                msg += "\n".join([f"\n- {t[0]} @ ₹{t[1]}" for t in open_tr]) if open_tr else " None"
-                send_telegram(msg)
-    except: pass
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"Active")
-    def log_message(self, format, *args): return
-
-def market_open():
-    now = datetime.now(IST)
-    curr = now.hour * 60 + now.minute
-    return now.weekday() < 5 and 555 <= curr <= 930
-
-def run():
-    init_db()
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    send_telegram("🚀 BRAHMAND KAVACH V32.1 BRAHMASTRA LIVE\nCompounding + NIFTY Shield + 1-Min Confirm + Rate-Limit Fix = ON")
-
-    try:
-        df_nse = pd.read_csv(NSE500_URL)
-        df_nse.to_csv("nifty500_backup.csv", index=False)
-        symbols = (df_nse["Symbol"] + ".NS").tolist()
-    except:
-        symbols = (pd.read_csv("nifty500_backup.csv")["Symbol"] + ".NS").tolist()
-
+# ========== SCHEDULER ==========
+def scheduler():
     while True:
-        try:
-            check_telegram_commands()
-            check_special_messages()
-            manage_exits()
-            if market_open():
-                _, max_slots = get_dynamic_config()
-                conn = sqlite3.connect(DB_FILE)
-                current_open = conn.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'").fetchone()[0]
-                conn.close()
-                if current_open < max_slots:
-                    # V32.1: बैच में स्कैन करो + गैप दो
-                    for i in range(0, len(symbols), 5): # 5-5 के बैच
-                        batch = symbols[i:i+5]
-                        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                            futures = {executor.submit(analyze_stock, s): s for s in batch}
-                            for f in as_completed(futures):
-                                conn = sqlite3.connect(DB_FILE)
-                                now_open = conn.execute("SELECT COUNT(*) FROM trades WHERE status='OPEN'").fetchone()[0]
-                                if now_open >= max_slots:
-                                    conn.close(); executor.shutdown(wait=False, cancel_futures=True); break
-                                conn.close()
-                                res = f.result()
-                                if res:
-                                    conn = sqlite3.connect(DB_FILE)
-                                    try:
-                                        conn.execute("INSERT INTO trades (symbol, entry, sl, target, qty, status, highest_price, entry_time) VALUES (?,?,?,?,?,?,?,?)",
-                                        (res['symbol'], res['price'], res['sl'], res['target'], res['qty'], "OPEN", res['price'], datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")))
-                                        conn.commit()
-                                        send_telegram(f"🟢 *BUY:* `{res['symbol']}`\n━━━━━━━━━━━━━━━\n💰 Entry: ₹{res['price']:,.2f}\n🛑 SL: ₹{res['sl']:,.2f}\n🎯 Target: ₹{res['target']:,.2f}\n📦 Qty: {res['qty']}")
-                                    except: pass
-                                    finally: conn.close()
-                        time.sleep(2) # V32.1: हर बैच के बाद 2 sec का ब्रेक
-            time.sleep(SCAN_INTERVAL)
-        except Exception as e: logging.error(f"Loop: {e}"); time.sleep(30)
+        now = datetime.now(pytz.timezone('Asia/Kolkata'))
+        if now.weekday() < 5 and now.hour >= 9 and now.hour < 15: # Mon-Fri 9AM-3PM
+            if now.minute % 30 == 0 or now.minute % 5 == 0: # 5-min या 30-min
+                run_scan()
+        if now.hour == 15 and now.minute == 35: # 3:35 PM क्लोजिंग रिपोर्ट
+            bot.send_message(CHAT_ID, "📉 **आज की क्लोजिंग रिपोर्ट:**\nआज कोई ट्रेड क्लोज नहीं हुआ")
+        time.sleep(60)
 
-if __name__ == "__main__": run()
+# ========== FLASK KEEP ALIVE ==========
+app = Flask('')
+@app.route('/')
+def home():
+    return "BRAHMAND KAVACH V32.2 Live"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=10000)
+
+# ========== START ==========
+if __name__ == "__main__":
+    init_db()
+    threading.Thread(target=scheduler).start()
+    threading.Thread(target=run_flask).start()
+    print("BRAHMAND KAVACH V32.2 Started")
+    bot.polling()

@@ -1,6 +1,6 @@
-pyTelegramBotAPI
-yfinance
-pandas
-numpy
-flask
-gunicorn
+python-telegram-bot==20.7
+yfinance==0.2.38
+pandas==2.2.1
+numpy==1.26.4
+flask==3.0.0
+pytz==2024.1

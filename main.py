@@ -1,4 +1,22 @@
-import telebot
+# ========== RENDER FREE PLAN FIX - START ==========
+import threading, os
+from flask import Flask
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Om Bot Running - V40.1"
+
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+threading.Thread(target=run_flask).start()
+# ========== RENDER FREE PLAN FIX - END ==========
+
+# 👇 इसके नीचे आपका पुराना बॉट का सारा कोड जैसा था वैसा रहने दो
+import telegram
+# ... बाकी सारा कोड ...import telebot
 import yfinance as yf
 import pandas as pd
 import json

@@ -1,222 +1,170 @@
-# ========== RENDER FREE PLAN FIX - START ==========
-import threading, os
+# ========== OM BOT V40.3 - NIFTY 250 SCANNER ==========
+import threading, os, time
 from flask import Flask
+import telegram
+import pandas as pd
+import yfinance as yf
+from datetime import datetime
+import pytz
+
+# ====== FLASK DUMMY SERVER FOR RENDER FREE ======
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Om Bot Running - V40.1"
+    ist = pytz.timezone('Asia/Kolkata')
+    current_time = datetime.now(ist).strftime('%d-%m-%Y %H:%M:%S')
+    return f"Om Bot V40.3 Running ✅<br>Scanning 250 Stocks<br>Time: {current_time}<br>409 Fixed 🛡️"
 
 def run_flask():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
 
-threading.Thread(target=run_flask).start()
-# ========== RENDER FREE PLAN FIX - END ==========
+threading.Thread(target=run_flask, daemon=True).start()
 
-# 👇 इसके नीचे आपका पुराना बॉट का सारा कोड जैसा था वैसा रहने दो
-import telegram
-# ... बाकी सारा कोड ...import telebot
-import yfinance as yf
-import pandas as pd
-import json
-import os
-import time
-import logging
-from datetime import datetime
-from pytz import timezone
+# ====== BOT CONFIG ======
+BOT_TOKEN = os.environ.get('BOT_TOKEN')
+CHAT_ID = os.environ.get('CHAT_ID')
 
-# ===== LOGGING SETUP =====
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+if not BOT_TOKEN or not CHAT_ID:
+    print("ERROR: BOT_TOKEN or CHAT_ID missing")
+    exit()
 
-# ===== CONFIG =====
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID_VAL = os.environ.get("CHAT_ID")
+bot = telegram.Bot(token=BOT_TOKEN)
+IST = pytz.timezone('Asia/Kolkata')
 
-if not BOT_TOKEN or not CHAT_ID_VAL:
-    logging.error("BOT_TOKEN या CHAT_ID Environment में नहीं मिला!")
-    exit(1)
-
-CHAT_ID = int(CHAT_ID_VAL)
-bot = telebot.TeleBot(BOT_TOKEN)
-IST = timezone('Asia/Kolkata')
-
-STATE_FILE = "v40_state.json"
-DAILY_LOSS_LIMIT = -1500
-MAX_POS = 6
-RISK_PER_TRADE = 25000
-SCAN_INTERVAL = 900 # 15 मिनट
-YF_DELAY = 2.5 # Rate limit से बचने के लिए
-
-nifty250 = [
-    "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS","HINDUNILVR.NS",
-    "ITC.NS","SBIN.NS","BHARTIARTL.NS","KOTAKBANK.NS","LT.NS","ASIANPAINT.NS",
-    "AXISBANK.NS","MARUTI.NS","SUNPHARMA.NS","TITAN.NS","ULTRACEMCO.NS","BAJFINANCE.NS",
-    "WIPRO.NS","NESTLEIND.NS","POWERGRID.NS","NTPC.NS","ONGC.NS","TECHM.NS",
-    "TATAMOTORS.NS","M&M.NS","HCLTECH.NS","COALINDIA.NS","ADANIENT.NS","ADANIPORTS.NS",
-    "JSWSTEEL.NS","HINDALCO.NS","GRASIM.NS","CIPLA.NS","DRREDDY.NS","EICHERMOT.NS",
-    "HEROMOTOCO.NS","BAJAJ-AUTO.NS","TATASTEEL.NS","INDUSINDBK.NS","BAJAJFINSV.NS",
-    "DIVISLAB.NS","BRITANNIA.NS","APOLLOHOSP.NS","UPL.NS","TATACONSUM.NS","BPCL.NS",
-    "SHREECEM.NS","PIDILITIND.NS","DABUR.NS","SBILIFE.NS","HDFCLIFE.NS","ICICIPRULI.NS",
-    "VEDL.NS","GODREJCP.NS","SIEMENS.NS","AMBUJACEM.NS","BANDHANBNK.NS","BANKBARODA.NS",
-    "BERGEPAINT.NS","BIOCON.NS","BOSCHLTD.NS","CADILAHC.NS","CANBK.NS","CHOLAFIN.NS",
-    "COLPAL.NS","CONCOR.NS","DLF.NS","GAIL.NS","HAVELLS.NS","HINDPETRO.NS",
-    "IDFCFIRSTB.NS","IGL.NS","INDIGO.NS","IOC.NS","JINDALSTEL.NS","LICHSGFIN.NS",
-    "LUPIN.NS","MARICO.NS","MUTHOOTFIN.NS","NAUKRI.NS","NMDC.NS","PAGEIND.NS",
-    "PETRONET.NS","PFC.NS","PGHH.NS","PNB.NS","RECLTD.NS","SAIL.NS","SRF.NS",
-    "TORNTPHARM.NS","TORNTPOWER.NS","TVSMOTOR.NS","UBL.NS","VOLTAS.NS","ZEEL.NS",
-    "ZYDUSLIFE.NS","ABB.NS","ACC.NS","ALKEM.NS","ASHOKLEY.NS","ASTRAL.NS","ATUL.NS",
-    "AUBANK.NS","BALKRISIND.NS","BEL.NS","BHEL.NS","DALBHARAT.NS","DEEPAKNTR.NS",
-    "ESCORTS.NS","FEDERALBNK.NS","GUJGASLTD.NS","HAL.NS","HONAUT.NS","IDBI.NS",
-    "IDEA.NS","INDIANB.NS","IRCTC.NS","JUBLFOOD.NS","LALPATHLAB.NS","LAURUSLABS.NS",
-    "M&MFIN.NS","MANAPPURAM.NS","MFSL.NS","MPHASIS.NS","MRF.NS","MOTHERSON.NS",
-    "OBEROIRLTY.NS","OFSS.NS","PERSISTENT.NS","PIIND.NS","POLYCAB.NS","RBLBANK.NS",
-    "SUNDARMFIN.NS","TATACHEM.NS","TATACOMM.NS","TATAELXSI.NS","TATAPOWER.NS",
-    "TRENT.NS","UNIONBANK.NS","VBL.NS","YESBANK.NS","ABFRL.NS","AIAENG.NS",
-    "APLAPOLLO.NS","AARTIIND.NS","ADANIGREEN.NS","AFFLE.NS","AJANTPHARM.NS",
-    "AMARAJABAT.NS","APOLLOTYRE.NS","AUROPHARMA.NS","BAJAJHLDNG.NS","BALRAMCHIN.NS",
-    "BATAINDIA.NS","BHARATFORG.NS","CAMS.NS","CANFINHOME.NS","CDSL.NS","CHAMBLFERT.NS",
-    "CROMPTON.NS","CUMMINSIND.NS","DIXON.NS","FORTIS.NS","GLENMARK.NS","GODREJPROP.NS",
-    "GRANULES.NS","HAPPSTMNDS.NS","INDHOTEL.NS","INDIAMART.NS","IEX.NS","IPCALAB.NS",
-    "JUBLPHARM.NS","KAJARIACER.NS","KPITTECH.NS","LICI.NS","LTTS.NS","METROPOLIS.NS",
-    "NH.NS","OIL.NS","PEL.NS","PHOENIXLTD.NS","POONAWALLA.NS","PRESTIGE.NS",
-    "RADICO.NS","RAJESHEXPO.NS","RAMCOCEM.NS","RELAXO.NS","SCHAEFFLER.NS",
-    "SHRIRAMFIN.NS","SOBHA.NS","SOLARINDS.NS","SUNTV.NS","SUPREMEIND.NS",
-    "SYNGENE.NS","TANLA.NS","TIMKEN.NS","TRIDENT.NS","TTKPRESTIG.NS","UJJIVANSFB.NS",
-    "VGUARD.NS","WHIRLPOOL.NS","ZENSARTECH.NS","ZOMATO.NS"
+# ====== NIFTY 250 STOCK LIST ======
+NIFTY_250 = [
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
+    "HINDUNILVR.NS", "ITC.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS",
+    "LT.NS", "AXISBANK.NS", "ASIANPAINT.NS", "MARUTI.NS", "SUNPHARMA.NS",
+    "TITAN.NS", "ULTRACEMCO.NS", "BAJFINANCE.NS", "NESTLEIND.NS", "WIPRO.NS",
+    "ONGC.NS", "NTPC.NS", "JSWSTEEL.NS", "POWERGRID.NS", "M&M.NS",
+    "TATAMOTORS.NS", "HCLTECH.NS", "BAJAJFINSV.NS", "ADANIENT.NS", "COALINDIA.NS",
+    "TECHM.NS", "INDUSINDBK.NS", "HINDALCO.NS", "TATASTEEL.NS", "GRASIM.NS",
+    "CIPLA.NS", "DRREDDY.NS", "EICHERMOT.NS", "APOLLOHOSP.NS", "DIVISLAB.NS",
+    "BAJAJ-AUTO.NS", "BRITANNIA.NS", "UPL.NS", "HEROMOTOCO.NS", "BPCL.NS",
+    "SHREECEM.NS", "ADANIPORTS.NS", "TATACONSUM.NS", "DABUR.NS", "GODREJCP.NS",
+    "HAVELLS.NS", "PIDILITIND.NS", "SIEMENS.NS", "AMBUJACEM.NS", "BANKBARODA.NS",
+    "DLF.NS", "GAIL.NS", "IOC.NS", "VEDL.NS", "INDIGO.NS",
+    "MCDOWELL-N.NS", "MARICO.NS", "MUTHOOTFIN.NS", "PEL.NS", "PGHH.NS",
+    "ABB.NS", "ACC.NS", "ADANIGREEN.NS", "ADANITRANS.NS", "ALKEM.NS",
+    "ASHOKLEY.NS", "ASTRAL.NS", "ATGL.NS", "AUBANK.NS", "AUROPHARMA.NS",
+    "BALKRISIND.NS", "BANDHANBNK.NS", "BATAINDIA.NS", "BEL.NS", "BERGEPAINT.NS",
+    "BIOCON.NS", "BOSCHLTD.NS", "CANBK.NS", "CHOLAFIN.NS", "COLPAL.NS",
+    "CONCOR.NS", "COROMANDEL.NS", "CUMMINSIND.NS", "DALBHARAT.NS", "DEEPAKNTR.NS",
+    "DIXON.NS", "ESCORTS.NS", "FEDERALBNK.NS", "GLAND.NS", "GNFC.NS",
+    "GODREJPROP.NS", "GUJGASLTD.NS", "HAL.NS", "HDFCAMC.NS", "HDFCLIFE.NS",
+    "HINDPETRO.NS", "ICIGI.NS", "ICICIPRULI.NS", "IDFCFIRSTB.NS", "IEX.NS",
+    "IGL.NS", "INDHOTEL.NS", "INDUSTOWER.NS", "NAUKRI.NS", "IRCTC.NS",
+    "JINDALSTEL.NS", "JUBLFOOD.NS", "L&TFH.NS", "LALPATHLAB.NS", "LICHSGFIN.NS",
+    "LTIM.NS", "LUPIN.NS", "MFSL.NS", "MPHASIS.NS", "MRF.NS",
+    "NAM-INDIA.NS", "NMDC.NS", "OBEROIRLTY.NS", "OFSS.NS", "PAGEIND.NS",
+    "PERSISTENT.NS", "PETRONET.NS", "PFC.NS", "PIIND.NS", "POLYCAB.NS",
+    "PVRINOX.NS", "RAMCOCEM.NS", "RECLTD.NS", "SAIL.NS", "SBILIFE.NS",
+    "SRF.NS", "SRTRANSFIN.NS", "TATACHEM.NS", "TATACOMM.NS", "TATAPOWER.NS",
+    "TORNTPHARM.NS", "TORNTPOWER.NS", "TRENT.NS", "TVSMOTOR.NS", "UBL.NS",
+    "UNIONBANK.NS", "UNITDSPR.NS", "VBL.NS", "VOLTAS.NS", "ZYDUSLIFE.NS",
+    "ABFRL.NS", "AIAENG.NS", "APLAPOLLO.NS", "AARTIIND.NS", "ABSLAMC.NS",
+    "ADVENZYMES.NS", "AFFLE.NS", "AJANTPHARM.NS", "ALKYLAMINE.NS", "AMARAJABAT.NS",
+    "ANURAS.NS", "APLLTD.NS", "ASAHIINDIA.NS", "ATUL.NS", "AVANTIFEED.NS",
+    "BAJAJHLDNG.NS", "BALAMINES.NS", "BALRAMCHIN.NS", "BANKINDIA.NS", "BAYERCROP.NS",
+    "BBTC.NS", "BEML.NS", "BHARATFORG.NS", "BHEL.NS", "BIRLACORPN.NS",
+    "BLUEDART.NS", "CENTRALBK.NS", "CENTURYTEX.NS", "CESC.NS", "CGPOWER.NS",
+    "CHAMBLFERT.NS", "CHENNPETRO.NS", "COFORGE.NS", "CREDITACC.NS", "CRISIL.NS",
+    "CROMPTON.NS", "CYIENT.NS", "DCBBANK.NS", "DCMSHRIRAM.NS", "DELTACORP.NS",
+    "ECLERX.NS", "EDELWEISS.NS", "EIDPARRY.NS", "ENDURANCE.NS", "ENGINERSIN.NS",
+    "EQUITASBNK.NS", "EXIDEIND.NS", "FINEORG.NS", "FINCABLES.NS", "FORTIS.NS",
+    "FSL.NS", "GALAXYSURF.NS", "GARFIBRES.NS", "GESHIP.NS", "GHCL.NS",
+    "GILLETTE.NS", "GLAXO.NS", "GLENMARK.NS", "GMRINFRA.NS", "GODFRYPHLP.NS",
+    "GODREJAGRO.NS", "GODREJIND.NS", "GRANULES.NS", "GRAPHITE.NS", "GRINDWELL.NS",
+    "GSFC.NS", "GSPL.NS", "GUJALKALI.NS", "HEG.NS", "HINDCOPPER.NS",
+    "HINDZINC.NS", "HONAUT.NS", "HSCL.NS", "HUDCO.NS", "IBULHSGFIN.NS",
+    "IDBI.NS", "IDEA.NS", "IDFC.NS", "IIFL.NS", "INDIACEM.NS",
+    "INDIANB.NS", "INDIAMART.NS", "IOLCP.NS", "IPCALAB.NS", "IRB.NS",
+    "ISEC.NS", "ITI.NS", "J&KBANK.NS", "JBCHEPHARM.NS", "JKLAKSHMI.NS",
+    "JKPAPER.NS", "JMFINANCIL.NS", "JSL.NS", "JSWENERGY.NS", "JUBLINGREA.NS",
+    "JUSTDIAL.NS", "JYOTHYLAB.NS", "KAJARIACER.NS", "KALPATPOWR.NS", "KANSAINER.NS",
+    "KARURVYSYA.NS", "KEC.NS", "KEI.NS", "KIRLOSENG.NS", "KNRCON.NS",
+    "KOTARISUG.NS", "KPITTECH.NS", "KPRMILL.NS", "KRBL.NS", "KSB.NS",
+    "LAOPALA.NS", "LAXMIMACH.NS", "LICI.NS", "LUXIND.NS", "MAHABANK.NS"
 ]
 
-# ===== STATE MANAGEMENT =====
-def load_state():
-    today = str(datetime.now(IST).date())
-    default_state = {"pos": {}, "daily_pnl": 0, "date": today}
-
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE) as f:
-                s = json.load(f)
-                # नया दिन है तो PNL रीसेट
-                if s.get("date")!= today:
-                    s["daily_pnl"] = 0
-                    s["date"] = today
-                return s
-        except Exception as e:
-            logging.error(f"State load error: {e}")
-    return default_state
-
-def save_state(s):
-    try:
-        with open(STATE_FILE, "w") as f: json.dump(s, f)
-    except Exception as e:
-        logging.error(f"State save error: {e}")
-
-state = load_state()
-
-# ===== TELEGRAM FUNCTIONS =====
+# ====== BOT FUNCTIONS ======
 def send_msg(text):
     try:
-        bot.send_message(CHAT_ID, text, parse_mode='Markdown')
-        logging.info(f"Msg sent: {text[:50]}...")
+        bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
     except Exception as e:
-        logging.error(f"TG Error: {e}")
+        print(f"Telegram Error: {e}")
 
-@bot.message_handler(commands=['start'])
-def cmd_start(m):
-    if m.chat.id == CHAT_ID:
-        bot.reply_to(m, "🚩 *जय श्री राम*\nV40.1 ब्रह्मास्त्र चालू है\n/status भेजो स्टेटस के लिए")
-
-@bot.message_handler(commands=['status'])
-def cmd_status(m):
-    if m.chat.id == CHAT_ID:
-        txt = f"🚩 *V40.1 Status*\nPos: {len(state['pos'])}/{MAX_POS}\nDaily PNL: {state['daily_pnl']}\nDate: {state['date']}"
-        bot.reply_to(m, txt)
-
-@bot.message_handler(commands=['ping'])
-def cmd_ping(m):
-    if m.chat.id == CHAT_ID:
-        bot.reply_to(m, "✅ Pong! Bot जिंदा है")
-
-# ===== TRADING FUNCTIONS =====
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
-
-def get_data(symbol):
-    time.sleep(YF_DELAY)
+def check_stock(ticker):
     try:
-        df = yf.download(symbol, period="60d", interval="1d", progress=False)
-        return df if not df.empty else pd.DataFrame()
-    except Exception as e:
-        logging.error(f"YF Error {symbol}: {e}")
-        return pd.DataFrame()
-
-def scan():
-    global state
-
-    # डेली लॉस लिमिट चेक
-    if state["daily_pnl"] <= DAILY_LOSS_LIMIT:
-        logging.info("Daily loss limit hit. Scanning stopped.")
-        return
-
-    for symbol in nifty250:
-        if symbol in state["pos"] or len(state["pos"]) >= MAX_POS:
-            continue
-
-        df = get_data(symbol)
-        if df.empty or len(df) < 55:
-            continue
-
-        df['EMA50'] = ema(df['Close'], 50)
-        c = df.iloc[-1]
-
-        # V40 लॉजिक: EMA50 से 2% ऊपर + ट्रेंड
-        if c['Close'] > c['EMA50'] * 1.02:
-            entry = float(c['Close'])
-            sl = entry * 0.97 # 3% SL
-            tp = entry + (entry - sl) * 2.7 # 1:2.7 RR
-            qty = max(1, int(RISK_PER_TRADE / (entry - sl)))
-
-            state["pos"][symbol] = {
-                "buy": round(entry, 2),
-                "sl": round(sl, 2),
-                "tp": round(tp, 2),
-                "qty": qty,
-                "time": str(datetime.now(IST))
+        df = yf.download(ticker, period="5d", interval="5m", progress=False)
+        if len(df) < 200:
+            return None
+            
+        df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        close = last['Close']
+        ema50 = last['EMA50']
+        ema200 = last['EMA200']
+        prev_close = prev['Close']
+        prev_ema50 = prev['EMA50']
+        
+        # BRAHMASTRA LOGIC: Price > EMA50*1.02 AND EMA50 > EMA200 AND Fresh Breakout
+        if close > ema50 * 1.02 and ema50 > ema200 and prev_close <= prev_ema50 * 1.02:
+            return {
+                'ticker': ticker.replace('.NS', ''),
+                'price': round(close, 2),
+                'ema50': round(ema50, 2),
+                'ema200': round(ema200, 2)
             }
-            save_state(state)
-            send_msg(
-                f"✅ *BUY ALERT* - `{symbol}`\n"
-                f"Entry: `{entry:.2f}`\n"
-                f"SL: `{sl:.2f}` | TP: `{tp:.2f}`\n"
-                f"Qty: `{qty}`"
-            )
-            logging.info(f"Signal generated: {symbol}")
+        return None
+        
+    except Exception as e:
+        print(f"Error {ticker}: {e}")
+        return None
 
-# ===== MAIN LOOP =====
-def main_loop():
-    logging.info("Main scanning loop started")
-    send_msg("🚩 *V40.1 ब्रह्मास्त्र चालू*\nमुनीम जी गद्दी पर बैठ गए")
+def scan_all_stocks():
+    signals = []
+    for ticker in NIFTY_250:
+        result = check_stock(ticker)
+        if result:
+            signals.append(result)
+        time.sleep(0.5)  # Rate limit बचाने के लिए
+    return signals
 
+def main():
+    send_msg("✅ *V40.3 ब्रह्मास्त्र चालू* ✅\n\n`250 Stocks Scanner`\n`Render Free + Flask`\n`Pandas Fixed`\n`UptimeRobot Ready` 🛡️")
+    print("Bot started polling...")
+    
     while True:
-        now = datetime.now(IST)
-        # सोमवार-शुक्रवार, 9:15 से 3:30 तक
-        if now.weekday() < 5 and 915 <= now.hour*100+now.minute <= 1530:
-            logging.info("Market open. Scanning...")
-            scan()
-        else:
-            logging.info("Market closed. Sleeping...")
+        try:
+            now = datetime.now(IST)
+            # Market hours: 9:15 AM to 3:30 PM IST, Mon-Fri
+            if now.weekday() < 5 and 9 <= now.hour < 16:
+                if not (now.hour == 15 and now.minute > 30):
+                    print(f"Scanning 250 stocks... {now.strftime('%H:%M:%S')}")
+                    signals = scan_all_stocks()
+                    
+                    if signals:
+                        msg = f"🚀 *BRAHMASTRA SIGNALS* 🚀\n*{len(signals)} Stocks Found*\n\n"
+                        for s in signals[:10]:  # Max 10 एक मैसेज में
+                            msg += f"*{s['ticker']}*\nPrice: `{s['price']}` | EMA50: `{s['ema50']}`\n\n"
+                        msg += f"_Time: {now.strftime('%H:%M:%S')}_"
+                        send_msg(msg)
+                    else:
+                        print("No signals found")
+            
+            time.sleep(300)  # 5 मिनट वेट
+            
+        except Exception as e:
+            print(f"Main Loop Error: {e}")
+            time.sleep(60)
 
-        time.sleep(SCAN_INTERVAL)
-
-if __name__ == "__main__":
-    import threading
-    # स्कैनिंग अलग Thread में
-    threading.Thread(target=main_loop, daemon=True).start()
-
-    # Telegram Polling Main Thread में - 409 Fix
-    logging.info("Starting Telegram polling...")
-    bot.remove_webhook() # Webhook की गारंटी से सफाई
-    time.sleep(1)
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+if __name__ == '__main__':
+    main()

@@ -8,5 +8,5 @@ ta==0.11.0
 google-generativeai==0.8.3
 python-dotenv==1.0.1
 requests==2.31.0
-NorenRestApiPy==1.0.3
+NorenRestApiPy==0.0.22
 pyotp==2.9.0
